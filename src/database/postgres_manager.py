@@ -20,7 +20,21 @@ class PostgreSQLManager:
     def __init__(self):
         """Инициализация менеджера PostgreSQL"""
         self.host = os.getenv('DB_HOST', 'localhost')
-        self.port = int(os.getenv('DB_PORT', '5432'))
+        # Проверяем, есть ли локальная база в проекте
+        project_base_path = os.path.join(os.getcwd(), 'DB_BASE')
+        local_data_path = os.path.join(project_base_path, 'vkinder_cluster')
+        
+        # Берем порт из .env, если не указан - определяем автоматически
+        env_port = os.getenv('DB_PORT')
+        if env_port:
+            self.port = int(env_port)
+        elif os.path.exists(local_data_path):
+            # Локальная база использует порт 5433
+            self.port = 5433
+        else:
+            # Системная база использует стандартный порт 5432
+            self.port = 5432
+        
         self.database = os.getenv('DB_NAME', 'vkinder_db')
         self.user = os.getenv('DB_USER', 'vkinder_user')
         self.password = os.getenv('DB_PASSWORD', 'vkinder123')
@@ -83,7 +97,13 @@ class PostgreSQLManager:
             if self.os_type == 'windows':
                 return self._start_postgresql_windows()
             elif self.os_type == 'macos':
-                return self._start_postgresql_macos()
+                # Проверяем сначала локальную БД в DB_BASE
+                local_data_path = os.path.join('DB_BASE', 'vkinder_cluster')
+                if os.path.exists(local_data_path):
+                    logger.info(f"📍 Найдена локальная БД, используем порт {self.port}")
+                    return self._start_local_postgres(local_data_path)
+                # Иначе используем Homebrew PostgreSQL
+                return self._start_homebrew_postgres()
             elif self.os_type == 'linux':
                 return self._start_postgresql_linux()
             else:
@@ -344,24 +364,68 @@ class PostgreSQLManager:
     def _start_homebrew_postgres(self) -> bool:
         """Запуск PostgreSQL через Homebrew"""
         try:
-            logger.info("🍺 Запуск PostgreSQL через Homebrew...")
+            # Сначала проверяем, есть ли локальная база в проекте
+            project_base_path = os.path.join(os.getcwd(), 'DB_BASE')
+            local_data_path = os.path.join(project_base_path, 'vkinder_cluster')
             
-            # Запускаем PostgreSQL через brew services
-            result = subprocess.run(['brew', 'services', 'start', 'postgresql'], 
-                                  capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                logger.info("✅ PostgreSQL запущен через Homebrew")
-                return True
+            if os.path.exists(local_data_path):
+                logger.info("📁 Найдена локальная база данных в проекте")
+                return self._start_local_postgres(local_data_path)
             else:
-                logger.error(f"❌ Ошибка запуска через Homebrew: {result.stderr}")
-                return False
+                logger.info("🍺 Запуск PostgreSQL через Homebrew...")
+                
+                # Запускаем PostgreSQL через brew services
+                result = subprocess.run(['brew', 'services', 'start', 'postgresql'], 
+                                      capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    logger.info("✅ PostgreSQL запущен через Homebrew")
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка запуска через Homebrew: {result.stderr}")
+                    return False
                 
         except subprocess.TimeoutExpired:
             logger.error("❌ Таймаут запуска PostgreSQL")
             return False
         except Exception as e:
             logger.error(f"❌ Ошибка запуска через Homebrew: {e}")
+            return False
+    
+    def _start_local_postgres(self, data_path: str) -> bool:
+        """Запуск локального PostgreSQL из папки проекта"""
+        try:
+            # Преобразуем относительный путь в абсолютный
+            abs_data_path = os.path.abspath(data_path)
+            logger.info(f"🚀 Запуск PostgreSQL из папки проекта: {abs_data_path}")
+            
+            # Проверяем, что директория существует
+            if not os.path.exists(abs_data_path):
+                logger.error(f"❌ Директория не найдена: {abs_data_path}")
+                return False
+            
+            # Определяем путь к pg_ctl
+            pg_ctl_path = '/opt/homebrew/bin/pg_ctl'
+            if not os.path.exists(pg_ctl_path):
+                pg_ctl_path = 'pg_ctl'
+            
+            # Запускаем PostgreSQL с локальным data_directory
+            log_file = os.path.join(abs_data_path, 'logfile')
+            result = subprocess.run([pg_ctl_path, 'start', '-D', abs_data_path, '-l', log_file],
+                                  capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"✅ PostgreSQL запущен из папки проекта: {abs_data_path}")
+                return True
+            else:
+                logger.error(f"❌ Ошибка запуска локального PostgreSQL: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error("❌ Таймаут запуска PostgreSQL")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка запуска локального PostgreSQL: {e}")
             return False
     
     def _start_system_postgres(self) -> bool:
