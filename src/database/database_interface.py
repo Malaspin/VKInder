@@ -72,12 +72,13 @@ class DatabaseInterface:
                 logger.error("❌ Не удалось создать базу данных")
                 raise Exception("База данных недоступна")
             
-            # Создаем подключение к PostgreSQL
-            db_host = os.getenv('DB_HOST', 'localhost')
-            db_port = os.getenv('DB_PORT', '5432')
-            db_name = os.getenv('DB_NAME', 'vkinder_db')
-            db_user = os.getenv('DB_USER', 'vkinder_user')
-            db_password = os.getenv('DB_PASSWORD', 'vkinder123')
+            # Создаем подключение к PostgreSQL используя параметры из postgres_manager
+            # postgres_manager автоматически определяет правильный порт
+            db_host = postgres_manager.host
+            db_port = postgres_manager.port
+            db_name = postgres_manager.database
+            db_user = postgres_manager.user
+            db_password = postgres_manager.password
             
             database_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
             self.engine = create_engine(database_url, echo=False)
