@@ -7,28 +7,13 @@ API для интеграции с базой данных VKinder Bot
 import sys
 import os
 from typing import Optional, List, Dict, Any
-from src.utils.centralized_logger import centralized_logger
-
-# Защита от прямого запуска
-if __name__ == "__main__":
-    print("❌ Этот файл нельзя запускать напрямую!")
-    print("⚠️ Модули базы данных работают только как часть основной программы")
-    sys.exit(1)
+from .database_interface import DatabaseInterface
+from .postgres_manager import PostgreSQLManager
+from .models import VKUser, Photo, Favorite, Blacklisted, SearchHistory, UserSettings, BotLog, BotMessage
+from loguru import logger
 
 # Добавляем путь к модулям проекта
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-try:
-    from .database_interface import DatabaseInterface
-    from .postgres_manager import PostgreSQLManager
-    from .models import VKUser, Photo, Favorite, Blacklisted, SearchHistory, UserSettings, BotLog, BotMessage
-except ImportError:
-    # Если относительные импорты не работают, используем абсолютные
-    from database_interface import DatabaseInterface
-    from postgres_manager import PostgreSQLManager
-    from models import VKUser, Photo, Favorite, Blacklisted, SearchHistory, UserSettings, BotLog, BotMessage
-
-from loguru import logger
 
 # Глобальный экземпляр интерфейса базы данных
 _db_interface = None
@@ -106,10 +91,8 @@ def get_database_info() -> Dict[str, Any]:
 
 def add_user(vk_user_id: int, first_name: str, last_name: str, 
              age: Optional[int] = None, sex: Optional[int] = None,
-             city: Optional[str] = None, city_id: Optional[int] = None,
-             country: Optional[str] = None, photo_url: Optional[str] = None, 
-             access: Optional[str] = None, refresh: Optional[str] = None, 
-             time: Optional[int] = None) -> bool:
+             city: Optional[str] = None, country: Optional[str] = None,
+             photo_url: Optional[str] = None) -> bool:
     """
     Добавление нового пользователя
     
@@ -120,12 +103,8 @@ def add_user(vk_user_id: int, first_name: str, last_name: str,
         age (Optional[int]): Возраст
         sex (Optional[int]): Пол (1 - женский, 2 - мужской)
         city (Optional[str]): Город
-        city_id (Optional[int]): ID города для VK API
         country (Optional[str]): Страна
         photo_url (Optional[str]): URL фотографии
-        access (Optional[str]): Access - string
-        refresh (Optional[str]): Refresh - string
-        time (Optional[int]): Time - integer
         
     Returns:
         bool: True если добавление успешно, False иначе
@@ -137,12 +116,8 @@ def add_user(vk_user_id: int, first_name: str, last_name: str,
         age=age,
         sex=sex,
         city=city,
-        city_id=city_id,
         country=country,
-        photo_url=photo_url,
-        access=access,
-        refresh=refresh,
-        time=time
+        photo_url=photo_url
     )
     
     # Логируем вызов API функции
@@ -178,91 +153,14 @@ def get_user(vk_user_id: int) -> Optional[Dict[str, Any]]:
                     'age': user.age,
                     'sex': user.sex,
                     'city': user.city,
-                    'city_id': user.city_id,
                     'country': user.country,
                     'photo_url': user.photo_url,
-                    'access': user.access,
-                    'refresh': user.refresh,
-                    'time': user.time,
                     'created_at': user.created_at,
                     'updated_at': user.updated_at
                 }
         return None
     except Exception as e:
-        centralized_logger.error(f"Ошибка получения пользователя {vk_user_id}: {e}")
-        return None
-
-
-def update_user_fields(vk_user_id: int, access: Optional[str] = None, 
-                      refresh: Optional[str] = None, time: Optional[int] = None,
-                      city_id: Optional[int] = None) -> bool:
-    """
-    Обновление дополнительных полей пользователя
-    
-    Args:
-        vk_user_id (int): ID пользователя VK
-        access (Optional[str]): Access - string
-        refresh (Optional[str]): Refresh - string
-        time (Optional[int]): Time - integer
-        city_id (Optional[int]): ID города для VK API
-        
-    Returns:
-        bool: True если обновление успешно, False иначе
-    """
-    try:
-        db_interface = get_db_interface()
-        with db_interface.get_session() as session:
-            from models import VKUser
-            user = session.query(VKUser).filter(VKUser.vk_user_id == vk_user_id).first()
-            if not user:
-                log_error(f"API: Пользователь {vk_user_id} не найден для обновления полей")
-                return False
-            
-            # Обновляем только переданные поля
-            if access is not None:
-                user.access = access
-            if refresh is not None:
-                user.refresh = refresh
-            if time is not None:
-                user.time = time
-            if city_id is not None:
-                user.city_id = city_id
-            
-            session.commit()
-            log_info(f"API: Поля пользователя {vk_user_id} обновлены")
-            return True
-            
-    except Exception as e:
-        centralized_logger.error(f"Ошибка обновления полей пользователя {vk_user_id}: {e}")
-        return False
-
-
-def get_user_fields(vk_user_id: int) -> Optional[Dict[str, Any]]:
-    """
-    Получение дополнительных полей пользователя
-    
-    Args:
-        vk_user_id (int): ID пользователя VK
-        
-    Returns:
-        Optional[Dict[str, Any]]: Поля пользователя или None
-    """
-    try:
-        db_interface = get_db_interface()
-        with db_interface.get_session() as session:
-            from models import VKUser
-            user = session.query(VKUser).filter(VKUser.vk_user_id == vk_user_id).first()
-            if user:
-                return {
-                    'vk_user_id': user.vk_user_id,
-                    'access': user.access,
-                    'refresh': user.refresh,
-                    'time': user.time,
-                    'updated_at': user.updated_at
-                }
-        return None
-    except Exception as e:
-        centralized_logger.error(f"Ошибка получения полей пользователя {vk_user_id}: {e}")
+        logger.error(f"Ошибка получения пользователя {vk_user_id}: {e}")
         return None
 
 
@@ -546,7 +444,7 @@ def add_test_data() -> bool:
         return True
         
     except Exception as e:
-        centralized_logger.error(f"Ошибка добавления тестовых данных: {e}")
+        logger.error(f"Ошибка добавления тестовых данных: {e}")
         return False
 
 
@@ -582,7 +480,7 @@ def example_usage():
     print("\n4. Логирование...")
     log_info("Пользователь зашел в бота", 123456)
     log_debug("Отладочная информация", 123456)
-    centralized_logger.error("Тестовая ошибка", 123456)
+    logger.error("Тестовая ошибка", 123456)
     print("✅ Логи записаны")
     
     # Сообщения
@@ -793,22 +691,8 @@ def get_table_list() -> List[str]:
         tables = inspector.get_table_names()
         return tables
     except Exception as e:
-        centralized_logger.error(f"Ошибка получения списка таблиц: {e}", user_id=0)
+        logger.error(f"Ошибка получения списка таблиц: {e}")
         return []
-
-def get_table_count(table_name: str) -> int:
-    """Получить количество записей в таблице"""
-    try:
-        from sqlalchemy import text
-        db = DatabaseInterface()
-        with db.get_session() as session:
-            # Используем raw SQL для подсчета записей
-            result = session.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
-            count = result.scalar()
-            return count if count is not None else 0
-    except Exception as e:
-        centralized_logger.error(f"Ошибка получения количества записей в таблице {table_name}: {e}")
-        return -1  # Возвращаем -1 для обозначения ошибки
 
 def get_table_info(table_name: str) -> Dict[str, Any]:
     """Получить детальную информацию о таблице"""
@@ -865,7 +749,7 @@ def get_table_info(table_name: str) -> Dict[str, Any]:
                         last_update = created_time.strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
             # Если нет полей времени или ошибка, оставляем N/A
-            centralized_logger.debug(f"Не удалось получить время обновления для таблицы {table_name}: {e}")
+            logger.debug(f"Не удалось получить время обновления для таблицы {table_name}: {e}")
             pass
         
         return {
@@ -875,7 +759,7 @@ def get_table_info(table_name: str) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        centralized_logger.error(f"Ошибка получения информации о таблице {table_name}: {e}")
+        logger.error(f"Ошибка получения информации о таблице {table_name}: {e}")
         return None
 
 def get_all_tables_info() -> Dict[str, Dict[str, Any]]:
@@ -942,7 +826,7 @@ def get_all_tables_info() -> Dict[str, Dict[str, Any]]:
                     }
                     
                 except Exception as e:
-                    centralized_logger.debug(f"Ошибка получения информации о таблице {table_name}: {e}")
+                    logger.debug(f"Ошибка получения информации о таблице {table_name}: {e}")
                     tables_info[table_name] = {
                         'count': 'ERROR',
                         'size': 'ERROR',
@@ -952,7 +836,7 @@ def get_all_tables_info() -> Dict[str, Dict[str, Any]]:
         return tables_info
         
     except Exception as e:
-        centralized_logger.error(f"Ошибка получения информации о всех таблицах: {e}")
+        logger.error(f"Ошибка получения информации о всех таблицах: {e}")
         return {}
 
 def get_database_stats() -> Dict[str, Any]:
@@ -979,7 +863,7 @@ def get_database_stats() -> Dict[str, Any]:
         
         return stats
     except Exception as e:
-        centralized_logger.error(f"Ошибка получения статистики БД: {e}")
+        logger.error(f"Ошибка получения статистики БД: {e}")
         return {"Ошибка": str(e)}
 
 def create_all_tables() -> bool:
@@ -988,36 +872,36 @@ def create_all_tables() -> bool:
         db = DatabaseInterface()
         success = db.create_database()
         if success:
-            centralized_logger.info("Все таблицы созданы успешно")
+            logger.info("Все таблицы созданы успешно")
         else:
-            centralized_logger.error("Ошибка создания таблиц")
+            logger.error("Ошибка создания таблиц")
         return success
     except Exception as e:
-        centralized_logger.error(f"Ошибка создания таблиц: {e}")
+        logger.error(f"Ошибка создания таблиц: {e}")
         return False
 
 def clear_all_tables() -> bool:
     """Очистить все таблицы в базе данных"""
-    centralized_logger.info("🔍 Начинаем очистку всех таблиц...")
+    logger.info("🔍 Начинаем очистку всех таблиц...")
     
     try:
-        centralized_logger.info("🔍 Создаем экземпляр DatabaseInterface...")
+        logger.info("🔍 Создаем экземпляр DatabaseInterface...")
         db = DatabaseInterface()
-        centralized_logger.info("✅ DatabaseInterface создан успешно")
+        logger.info("✅ DatabaseInterface создан успешно")
         
-        centralized_logger.info("🔍 Вызываем db.clear_all_tables()...")
+        logger.info("🔍 Вызываем db.clear_all_tables()...")
         success = db.clear_all_tables()
-        centralized_logger.info(f"📊 Результат db.clear_all_tables(): {success}")
+        logger.info(f"📊 Результат db.clear_all_tables(): {success}")
         
         if success:
-            centralized_logger.info("✅ Все таблицы очищены успешно")
+            logger.info("✅ Все таблицы очищены успешно")
         else:
-            centralized_logger.error("❌ Ошибка очистки таблиц")
+            logger.error("❌ Ошибка очистки таблиц")
         return success
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка очистки таблиц: {e}")
-        centralized_logger.error(f"❌ Тип ошибки: {type(e).__name__}")
-        centralized_logger.error(f"❌ Детали ошибки: {str(e)}")
+        logger.error(f"❌ Ошибка очистки таблиц: {e}")
+        logger.error(f"❌ Тип ошибки: {type(e).__name__}")
+        logger.error(f"❌ Детали ошибки: {str(e)}")
         return False
 
 
@@ -1037,24 +921,24 @@ def add_to_blacklist(user_id: int, blacklisted_id: int) -> bool:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return False
         
         # Проверяем, есть ли уже в черном списке
         existing = db.get_blacklisted(user_id)
         if blacklisted_id in existing:
-            centralized_logger.warning(f"⚠️ Пользователь {blacklisted_id} уже в черном списке пользователя {user_id}")
+            logger.warning(f"⚠️ Пользователь {blacklisted_id} уже в черном списке пользователя {user_id}")
             return True
         
         # Добавляем в черный список
         success = db.add_to_blacklist(user_id, blacklisted_id)
         if success:
-            centralized_logger.info(f"✅ Пользователь {blacklisted_id} добавлен в черный список пользователя {user_id}")
+            logger.info(f"✅ Пользователь {blacklisted_id} добавлен в черный список пользователя {user_id}")
         else:
-            centralized_logger.error(f"❌ Ошибка добавления пользователя {blacklisted_id} в черный список")
+            logger.error(f"❌ Ошибка добавления пользователя {blacklisted_id} в черный список")
         return success
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка добавления в черный список: {e}")
+        logger.error(f"❌ Ошибка добавления в черный список: {e}")
         return False
 
 
@@ -1071,14 +955,14 @@ def get_blacklist(user_id: int) -> list:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return []
         
         blacklist = db.get_blacklisted(user_id)
-        centralized_logger.info(f"✅ Получен черный список пользователя {user_id}: {len(blacklist)} пользователей")
+        logger.info(f"✅ Получен черный список пользователя {user_id}: {len(blacklist)} пользователей")
         return blacklist
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения черного списка: {e}")
+        logger.error(f"❌ Ошибка получения черного списка: {e}")
         return []
 
 
@@ -1096,18 +980,18 @@ def remove_from_blacklist(user_id: int, blacklisted_id: int) -> bool:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return False
         
         # Удаляем из черного списка
         success = db.remove_from_blacklist(user_id, blacklisted_id)
         if success:
-            centralized_logger.info(f"✅ Пользователь {blacklisted_id} удален из черного списка пользователя {user_id}")
+            logger.info(f"✅ Пользователь {blacklisted_id} удален из черного списка пользователя {user_id}")
         else:
-            centralized_logger.warning(f"⚠️ Пользователь {blacklisted_id} не найден в черном списке пользователя {user_id}")
+            logger.warning(f"⚠️ Пользователь {blacklisted_id} не найден в черном списке пользователя {user_id}")
         return success
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка удаления из черного списка: {e}")
+        logger.error(f"❌ Ошибка удаления из черного списка: {e}")
         return False
 
 
@@ -1125,15 +1009,15 @@ def is_user_blacklisted(user_id: int, target_user_id: int) -> bool:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return False
         
         blacklist = db.get_blacklisted(user_id)
         is_blacklisted = target_user_id in blacklist
-        centralized_logger.debug(f"🔍 Проверка черного списка: пользователь {target_user_id} {'в' if is_blacklisted else 'не в'} черном списке пользователя {user_id}")
+        logger.debug(f"🔍 Проверка черного списка: пользователь {target_user_id} {'в' if is_blacklisted else 'не в'} черном списке пользователя {user_id}")
         return is_blacklisted
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка проверки черного списка: {e}")
+        logger.error(f"❌ Ошибка проверки черного списка: {e}")
         return False
 
 
@@ -1152,15 +1036,15 @@ def get_user_statistics(user_id: int) -> dict:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return {}
         
         # Получаем статистику пользователя
         stats = db.get_user_statistics(user_id)
-        centralized_logger.info(f"✅ Получена статистика пользователя {user_id}: {len(stats)} показателей")
+        logger.info(f"✅ Получена статистика пользователя {user_id}: {len(stats)} показателей")
         return stats
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения статистики пользователя: {e}")
+        logger.error(f"❌ Ошибка получения статистики пользователя: {e}")
         return {}
 
 
@@ -1177,7 +1061,7 @@ def get_user_profile_stats(user_id: int) -> dict:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return {}
         
         # Получаем базовую статистику
@@ -1219,10 +1103,10 @@ def get_user_profile_stats(user_id: int) -> dict:
             else:
                 stats['user_settings'] = None
         
-        centralized_logger.info(f"✅ Получена расширенная статистика профиля пользователя {user_id}")
+        logger.info(f"✅ Получена расширенная статистика профиля пользователя {user_id}")
         return stats
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения статистики профиля: {e}")
+        logger.error(f"❌ Ошибка получения статистики профиля: {e}")
         return {}
 
 
@@ -1239,7 +1123,7 @@ def get_user_activity_summary(user_id: int) -> dict:
     try:
         db = DatabaseInterface()
         if not db.test_connection():
-            centralized_logger.error("❌ База данных недоступна")
+            logger.error("❌ База данных недоступна")
             return {}
         
         with db.get_session() as session:
@@ -1284,185 +1168,12 @@ def get_user_activity_summary(user_id: int) -> dict:
             ).count()
             activity['messages_last_week'] = recent_messages
         
-        centralized_logger.info(f"✅ Получена сводка активности пользователя {user_id}")
+        logger.info(f"✅ Получена сводка активности пользователя {user_id}")
         return activity
     except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения сводки активности: {e}")
+        logger.error(f"❌ Ошибка получения сводки активности: {e}")
         return {}
 
 
-# === ФУНКЦИИ ДЛЯ РАБОТЫ С ЗАШИФРОВАННЫМИ ТОКЕНАМИ ===
-
-def save_user_tokens(vk_user_id: int, access_token: str, refresh_token: str, expires_in: int = 3600) -> bool:
-    """
-    Сохранение зашифрованных токенов пользователя в базе данных
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        access_token: Access токен
-        refresh_token: Refresh токен
-        expires_in: Время жизни токена в секундах
-        
-    Returns:
-        bool: True если сохранение успешно, False иначе
-    """
-    try:
-        db = DatabaseInterface()
-        return db.save_user_tokens(vk_user_id, access_token, refresh_token, expires_in)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка сохранения токенов пользователя {vk_user_id}: {e}")
-        return False
-
-
-def get_user_access_token(vk_user_id: int) -> Optional[str]:
-    """
-    Получение расшифрованного access токена пользователя
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        
-    Returns:
-        Optional[str]: Расшифрованный access токен или None
-    """
-    try:
-        db = DatabaseInterface()
-        return db.get_user_access_token(vk_user_id)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения access токена пользователя {vk_user_id}: {e}")
-        return None
-
-
-def get_user_refresh_token(vk_user_id: int) -> Optional[str]:
-    """
-    Получение refresh токена пользователя из БД (не расшифрованный, а хеш)
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        
-    Returns:
-        Optional[str]: Refresh token hash или None если не найден
-    """
-    try:
-        db = DatabaseInterface()
-        return db.get_user_refresh_token(vk_user_id)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения refresh токена пользователя {vk_user_id}: {e}")
-        return None
-
-
-def get_user_refresh_token_decrypted(vk_user_id: int) -> Optional[str]:
-    """
-    Получение расшифрованного refresh токена пользователя из БД
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        
-    Returns:
-        Optional[str]: Расшифрованный refresh token или None если не найден
-    """
-    try:
-        db = DatabaseInterface()
-        return db.get_user_refresh_token_decrypted(vk_user_id)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения расшифрованного refresh токена пользователя {vk_user_id}: {e}")
-        return None
-
-
-def verify_user_refresh_token(vk_user_id: int, refresh_token: str) -> bool:
-    """
-    Проверка refresh токена пользователя
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        refresh_token: Refresh токен для проверки
-        
-    Returns:
-        bool: True если токен валиден, False иначе
-    """
-    try:
-        db = DatabaseInterface()
-        return db.verify_user_refresh_token(vk_user_id, refresh_token)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка проверки refresh токена пользователя {vk_user_id}: {e}")
-        return False
-
-
-def is_user_token_expired(vk_user_id: int) -> bool:
-    """
-    Проверка истечения токена пользователя
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        
-    Returns:
-        bool: True если токен истек, False иначе
-    """
-    try:
-        db = DatabaseInterface()
-        return db.is_user_token_expired(vk_user_id)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка проверки истечения токена пользователя {vk_user_id}: {e}")
-        return True
-
-
-def clear_user_tokens(vk_user_id: int) -> bool:
-    """
-    Очистка токенов пользователя из базы данных
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        
-    Returns:
-        bool: True если очистка успешна, False иначе
-    """
-    try:
-        db = DatabaseInterface()
-        return db.clear_user_tokens(vk_user_id)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка очистки токенов пользователя {vk_user_id}: {e}")
-        return False
-
-
-def get_user_token_info(vk_user_id: int) -> dict:
-    """
-    Получение информации о токенах пользователя
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        
-    Returns:
-        dict: Информация о токенах
-    """
-    try:
-        db = DatabaseInterface()
-        return db.get_user_token_info(vk_user_id)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка получения информации о токенах пользователя {vk_user_id}: {e}")
-        return {
-            'has_tokens': False,
-            'is_expired': True,
-            'expires_at': None,
-            'updated_at': None
-        }
-
-
-def update_user_tokens(vk_user_id: int, access_token: Optional[str] = None, 
-                      refresh_token: Optional[str] = None, expires_in: Optional[int] = None) -> bool:
-    """
-    Обновление токенов пользователя
-    
-    Args:
-        vk_user_id: ID пользователя VK
-        access_token: Новый access токен (опционально)
-        refresh_token: Новый refresh токен (опционально)
-        expires_in: Время жизни токена в секундах (опционально)
-        
-    Returns:
-        bool: True если обновление успешно, False иначе
-    """
-    try:
-        db = DatabaseInterface()
-        return db.update_user_tokens(vk_user_id, access_token, refresh_token, expires_in)
-    except Exception as e:
-        centralized_logger.error(f"❌ Ошибка обновления токенов пользователя {vk_user_id}: {e}")
-        return False
+if __name__ == "__main__":
+    example_usage()
