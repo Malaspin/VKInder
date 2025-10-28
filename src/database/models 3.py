@@ -34,18 +34,12 @@ class VKUser(Base):
     age = Column(Integer, nullable=True)
     sex = Column(Integer, nullable=True)  # 1 - женский, 2 - мужской
     city = Column(String(100), nullable=True)
-    city_id = Column(Integer, nullable=True)  # ID города для VK API
     country = Column(String(100), nullable=True)
     bdate = Column(String(20), nullable=True)
     photo_url = Column(String(500), nullable=True)
     profile_url = Column(String(200), nullable=True)
     is_closed = Column(Boolean, default=False, nullable=True)
     can_access_closed = Column(Boolean, default=False, nullable=True)
-    
-    # Дополнительные поля пользователя
-    access = Column(String(500), nullable=True)  # Access - string
-    refresh = Column(String(500), nullable=True)  # Refresh - string
-    time = Column(Integer, nullable=True)  # Time - integer
     
     # Временные метки
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -219,15 +213,6 @@ class UserSettings(Base):
     # Новые поля для статусов
     relationship_status = Column(String(50), nullable=True)  # single, married, divorced, etc.
     online = Column(Boolean, default=False, nullable=True)  # Только онлайн
-    
-    # Поля для зашифрованных токенов пользователя
-    encrypted_access_token = Column(Text, nullable=True)  # Зашифрованный access token
-    encrypted_refresh_token = Column(Text, nullable=True)  # Зашифрованный refresh token
-    refresh_token_hash = Column(String(128), nullable=True)  # Хеш refresh token (для проверки)
-    token_salt = Column(String(32), nullable=True)  # Соль для refresh token
-    token_iv = Column(String(24), nullable=True)  # IV для AES шифрования
-    token_expires_at = Column(DateTime(timezone=True), nullable=True)  # Время истечения токена
-    token_updated_at = Column(DateTime(timezone=True), nullable=True)  # Время последнего обновления
     
     # Временные метки
     created_at = Column(DateTime(timezone=True), server_default=func.now())

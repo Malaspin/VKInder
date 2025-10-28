@@ -8,12 +8,6 @@ import sys
 import argparse
 from typing import List, Optional
 
-# Защита от прямого запуска
-if __name__ == "__main__":
-    print("❌ Этот файл нельзя запускать напрямую!")
-    print("⚠️ Модули базы данных работают только как часть основной программы")
-    sys.exit(1)
-
 # Исправляем импорты для работы как отдельного скрипта
 try:
     from .database_interface import DatabaseInterface

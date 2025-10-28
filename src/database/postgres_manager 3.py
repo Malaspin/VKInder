@@ -12,7 +12,6 @@ import platform
 import psycopg2
 from typing import Optional, Dict, Any
 from loguru import logger
-from src.utils.centralized_logger import centralized_logger
 
 
 class PostgreSQLManager:
@@ -21,30 +20,11 @@ class PostgreSQLManager:
     def __init__(self):
         """Инициализация менеджера PostgreSQL"""
         self.host = os.getenv('DB_HOST', 'localhost')
-        # Проверяем, есть ли локальная база в проекте
-        project_base_path = os.path.join(os.getcwd(), 'DB_BASE')
-        local_data_path = os.path.join(project_base_path, 'vkinder_cluster')
-        
-        # Берем порт из .env, если не указан - определяем автоматически
-        env_port = os.getenv('DB_PORT')
-        if env_port:
-            self.port = int(env_port)
-        elif os.path.exists(local_data_path):
-            # Локальная база использует порт 5433
-            self.port = 5433
-        else:
-            # Локальная база использует порт 5433
-            self.port = 5433
-        
+        self.port = int(os.getenv('DB_PORT', '5432'))
         self.database = os.getenv('DB_NAME', 'vkinder_db')
         self.user = os.getenv('DB_USER', 'vkinder_user')
         self.password = os.getenv('DB_PASSWORD', 'vkinder123')
         self.os_type = self._detect_os()
-        
-        # Кэширование статуса PostgreSQL для оптимизации
-        self._status_cache = None
-        self._status_cache_time = 0
-        self._cache_timeout = 30  # Кэш на 30 секунд
     
     def _detect_os(self) -> str:
         """
@@ -75,19 +55,19 @@ class PostgreSQLManager:
             conn = psycopg2.connect(
                 host=self.host,
                 port=self.port,
-                database=self.database,  # Используем нашу базу данных
+                database='postgres',  # Подключаемся к системной БД
                 user=self.user,
                 password=self.password
             )
             conn.close()
-            centralized_logger.info("✅ PostgreSQL запущен и доступен")
+            logger.info("✅ PostgreSQL запущен и доступен")
             return True
             
         except psycopg2.OperationalError as e:
-            centralized_logger.warning(f"⚠️ PostgreSQL недоступен: {e}")
+            logger.warning(f"⚠️ PostgreSQL недоступен: {e}")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка проверки PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка проверки PostgreSQL: {e}")
             return False
     
     def start_postgresql(self) -> bool:
@@ -98,26 +78,20 @@ class PostgreSQLManager:
             bool: True если запуск успешен, False иначе
         """
         try:
-            centralized_logger.info(f"🚀 Запуск PostgreSQL на {self.os_type.upper()}...")
+            logger.info(f"🚀 Запуск PostgreSQL на {self.os_type.upper()}...")
             
             if self.os_type == 'windows':
                 return self._start_postgresql_windows()
             elif self.os_type == 'macos':
-                # Проверяем сначала локальную БД в DB_BASE
-                local_data_path = os.path.join('DB_BASE', 'vkinder_cluster')
-                if os.path.exists(local_data_path):
-                    centralized_logger.info(f"📍 Найдена локальная БД, используем порт {self.port}")
-                    return self._start_local_postgres(local_data_path)
-                # Иначе используем Homebrew PostgreSQL
-                return self._start_homebrew_postgres()
+                return self._start_postgresql_macos()
             elif self.os_type == 'linux':
                 return self._start_postgresql_linux()
             else:
-                centralized_logger.error(f"❌ Неподдерживаемая ОС: {self.os_type}")
+                logger.error(f"❌ Неподдерживаемая ОС: {self.os_type}")
                 return False
                 
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка запуска PostgreSQL: {e}")
             return False
     
     def _start_postgresql_windows(self) -> bool:
@@ -128,7 +102,7 @@ class PostgreSQLManager:
             bool: True если запуск успешен, False иначе
         """
         try:
-            centralized_logger.info("🚀 Запуск PostgreSQL на Windows...")
+            logger.info("🚀 Запуск PostgreSQL на Windows...")
             
             # Проверяем службу PostgreSQL
             if self._check_windows_service():
@@ -139,11 +113,11 @@ class PostgreSQLManager:
                 return self._start_windows_postgres()
             
             else:
-                centralized_logger.error("❌ PostgreSQL не найден. Установите PostgreSQL с официального сайта")
+                logger.error("❌ PostgreSQL не найден. Установите PostgreSQL с официального сайта")
                 return False
                 
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска PostgreSQL на Windows: {e}")
+            logger.error(f"❌ Ошибка запуска PostgreSQL на Windows: {e}")
             return False
     
     def _start_postgresql_linux(self) -> bool:
@@ -154,7 +128,7 @@ class PostgreSQLManager:
             bool: True если запуск успешен, False иначе
         """
         try:
-            centralized_logger.info("🚀 Запуск PostgreSQL на Linux...")
+            logger.info("🚀 Запуск PostgreSQL на Linux...")
             
             # Проверяем systemd
             if self._check_systemd():
@@ -169,11 +143,11 @@ class PostgreSQLManager:
                 return self._start_pg_ctl()
             
             else:
-                centralized_logger.error("❌ PostgreSQL не найден. Установите: sudo apt install postgresql")
+                logger.error("❌ PostgreSQL не найден. Установите: sudo apt install postgresql")
                 return False
                 
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска PostgreSQL на Linux: {e}")
+            logger.error(f"❌ Ошибка запуска PostgreSQL на Linux: {e}")
             return False
     
     def _check_windows_service(self) -> bool:
@@ -191,13 +165,13 @@ class PostgreSQLManager:
             result = subprocess.run(['sc', 'start', 'postgresql'], 
                                   capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
-                centralized_logger.info("✅ Служба PostgreSQL запущена")
+                logger.info("✅ Служба PostgreSQL запущена")
                 return True
             else:
-                centralized_logger.error(f"❌ Ошибка запуска службы: {result.stderr}")
+                logger.error(f"❌ Ошибка запуска службы: {result.stderr}")
                 return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска службы: {e}")
+            logger.error(f"❌ Ошибка запуска службы: {e}")
             return False
     
     def _check_windows_installation(self) -> bool:
@@ -233,13 +207,13 @@ class PostgreSQLManager:
                     result = subprocess.run([pg_ctl, 'start', '-D', 'data'], 
                                           capture_output=True, text=True, timeout=30)
                     if result.returncode == 0:
-                        centralized_logger.info("✅ PostgreSQL запущен через pg_ctl")
+                        logger.info("✅ PostgreSQL запущен через pg_ctl")
                         return True
             
-            centralized_logger.error("❌ Не удалось найти pg_ctl")
+            logger.error("❌ Не удалось найти pg_ctl")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка запуска PostgreSQL: {e}")
             return False
     
     def _check_systemd(self) -> bool:
@@ -257,13 +231,13 @@ class PostgreSQLManager:
             result = subprocess.run(['sudo', 'systemctl', 'start', 'postgresql'], 
                                   capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
-                centralized_logger.info("✅ PostgreSQL запущен через systemctl")
+                logger.info("✅ PostgreSQL запущен через systemctl")
                 return True
             else:
-                centralized_logger.error(f"❌ Ошибка запуска через systemctl: {result.stderr}")
+                logger.error(f"❌ Ошибка запуска через systemctl: {result.stderr}")
                 return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска через systemctl: {e}")
+            logger.error(f"❌ Ошибка запуска через systemctl: {e}")
             return False
     
     def _check_service_command(self) -> bool:
@@ -281,13 +255,13 @@ class PostgreSQLManager:
             result = subprocess.run(['sudo', 'service', 'postgresql', 'start'], 
                                   capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
-                centralized_logger.info("✅ PostgreSQL запущен через service")
+                logger.info("✅ PostgreSQL запущен через service")
                 return True
             else:
-                centralized_logger.error(f"❌ Ошибка запуска через service: {result.stderr}")
+                logger.error(f"❌ Ошибка запуска через service: {result.stderr}")
                 return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска через service: {e}")
+            logger.error(f"❌ Ошибка запуска через service: {e}")
             return False
     
     def _check_pg_ctl(self) -> bool:
@@ -314,13 +288,13 @@ class PostgreSQLManager:
                     result = subprocess.run(['pg_ctl', 'start', '-D', data_dir], 
                                           capture_output=True, text=True, timeout=30)
                     if result.returncode == 0:
-                        centralized_logger.info("✅ PostgreSQL запущен через pg_ctl")
+                        logger.info("✅ PostgreSQL запущен через pg_ctl")
                         return True
             
-            centralized_logger.error("❌ Не удалось найти директорию данных PostgreSQL")
+            logger.error("❌ Не удалось найти директорию данных PostgreSQL")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска через pg_ctl: {e}")
+            logger.error(f"❌ Ошибка запуска через pg_ctl: {e}")
             return False
     
     def start_postgresql_macos(self) -> bool:
@@ -331,7 +305,7 @@ class PostgreSQLManager:
             bool: True если запуск успешен, False иначе
         """
         try:
-            centralized_logger.info("🚀 Запуск PostgreSQL на macOS...")
+            logger.info("🚀 Запуск PostgreSQL на macOS...")
             
             # Проверяем, установлен ли PostgreSQL через Homebrew
             if self._check_homebrew_postgres():
@@ -342,11 +316,11 @@ class PostgreSQLManager:
                 return self._start_system_postgres()
             
             else:
-                centralized_logger.error("❌ PostgreSQL не найден. Установите через Homebrew: brew install postgresql")
+                logger.error("❌ PostgreSQL не найден. Установите через Homebrew: brew install postgresql")
                 return False
                 
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка запуска PostgreSQL: {e}")
             return False
     
     def _check_homebrew_postgres(self) -> bool:
@@ -370,91 +344,47 @@ class PostgreSQLManager:
     def _start_homebrew_postgres(self) -> bool:
         """Запуск PostgreSQL через Homebrew"""
         try:
-            # Сначала проверяем, есть ли локальная база в проекте
-            project_base_path = os.path.join(os.getcwd(), 'DB_BASE')
-            local_data_path = os.path.join(project_base_path, 'vkinder_cluster')
+            logger.info("🍺 Запуск PostgreSQL через Homebrew...")
             
-            if os.path.exists(local_data_path):
-                centralized_logger.info("📁 Найдена локальная база данных в проекте")
-                return self._start_local_postgres(local_data_path)
-            else:
-                centralized_logger.info("🍺 Запуск PostgreSQL через Homebrew...")
-                
-                # Запускаем PostgreSQL через brew services
-                result = subprocess.run(['brew', 'services', 'start', 'postgresql'], 
-                                      capture_output=True, text=True, timeout=30)
-                
-                if result.returncode == 0:
-                    centralized_logger.info("✅ PostgreSQL запущен через Homebrew")
-                    return True
-                else:
-                    centralized_logger.error(f"❌ Ошибка запуска через Homebrew: {result.stderr}")
-                    return False
-                
-        except subprocess.TimeoutExpired:
-            centralized_logger.error("❌ Таймаут запуска PostgreSQL")
-            return False
-        except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска через Homebrew: {e}")
-            return False
-    
-    def _start_local_postgres(self, data_path: str) -> bool:
-        """Запуск локального PostgreSQL из папки проекта"""
-        try:
-            # Преобразуем относительный путь в абсолютный
-            abs_data_path = os.path.abspath(data_path)
-            centralized_logger.info(f"🚀 Запуск PostgreSQL из папки проекта: {abs_data_path}")
-            
-            # Проверяем, что директория существует
-            if not os.path.exists(abs_data_path):
-                centralized_logger.error(f"❌ Директория не найдена: {abs_data_path}")
-                return False
-            
-            # Определяем путь к pg_ctl
-            pg_ctl_path = '/opt/homebrew/bin/pg_ctl'
-            if not os.path.exists(pg_ctl_path):
-                pg_ctl_path = 'pg_ctl'
-            
-            # Запускаем PostgreSQL с локальным data_directory
-            log_file = os.path.join(abs_data_path, 'logfile')
-            result = subprocess.run([pg_ctl_path, 'start', '-D', abs_data_path, '-l', log_file],
+            # Запускаем PostgreSQL через brew services
+            result = subprocess.run(['brew', 'services', 'start', 'postgresql'], 
                                   capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
-                centralized_logger.info(f"✅ PostgreSQL запущен из папки проекта: {abs_data_path}")
+                logger.info("✅ PostgreSQL запущен через Homebrew")
                 return True
             else:
-                centralized_logger.error(f"❌ Ошибка запуска локального PostgreSQL: {result.stderr}")
+                logger.error(f"❌ Ошибка запуска через Homebrew: {result.stderr}")
                 return False
                 
         except subprocess.TimeoutExpired:
-            centralized_logger.error("❌ Таймаут запуска PostgreSQL")
+            logger.error("❌ Таймаут запуска PostgreSQL")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска локального PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка запуска через Homebrew: {e}")
             return False
     
     def _start_system_postgres(self) -> bool:
         """Запуск системного PostgreSQL"""
         try:
-            centralized_logger.info("🔧 Запуск системного PostgreSQL...")
+            logger.info("🔧 Запуск системного PostgreSQL...")
             
             # Пробуем запустить через pg_ctl
             result = subprocess.run(['pg_ctl', 'start', '-D', '/usr/local/var/postgres'], 
                                   capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
-                centralized_logger.info("✅ Системный PostgreSQL запущен")
+                logger.info("✅ Системный PostgreSQL запущен")
                 return True
             else:
-                centralized_logger.error(f"❌ Ошибка запуска системного PostgreSQL: {result.stderr}")
+                logger.error(f"❌ Ошибка запуска системного PostgreSQL: {result.stderr}")
                 return False
                 
         except subprocess.TimeoutExpired:
-            centralized_logger.error("❌ Таймаут запуска PostgreSQL")
+            logger.error("❌ Таймаут запуска PostgreSQL")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка запуска системного PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка запуска системного PostgreSQL: {e}")
             return False
     
     def wait_for_postgresql(self, timeout: int = 60) -> bool:
@@ -467,64 +397,42 @@ class PostgreSQLManager:
         Returns:
             bool: True если PostgreSQL запустился, False иначе
         """
-        centralized_logger.info(f"⏳ Ожидание запуска PostgreSQL (таймаут: {timeout}с)...")
+        logger.info(f"⏳ Ожидание запуска PostgreSQL (таймаут: {timeout}с)...")
         
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self.check_postgresql_status():
-                centralized_logger.info("✅ PostgreSQL успешно запущен!")
+                logger.info("✅ PostgreSQL успешно запущен!")
                 return True
             
             time.sleep(2)  # Ждем 2 секунды между проверками
         
-        centralized_logger.error(f"❌ Таймаут ожидания PostgreSQL ({timeout}с)")
+        logger.error(f"❌ Таймаут ожидания PostgreSQL ({timeout}с)")
         return False
     
     def ensure_postgresql_running(self) -> bool:
         """
-        Гарантирует, что PostgreSQL запущен (с кэшированием)
+        Гарантирует, что PostgreSQL запущен
         
         Returns:
             bool: True если PostgreSQL запущен, False иначе
         """
-        import time
-        
-        # Проверяем кэш
-        current_time = time.time()
-        if (self._status_cache is not None and 
-            current_time - self._status_cache_time < self._cache_timeout):
-            return self._status_cache
-        
-        centralized_logger.info("🔍 Проверка статуса PostgreSQL...")
+        logger.info("🔍 Проверка статуса PostgreSQL...")
         
         # Проверяем текущий статус
         if self.check_postgresql_status():
-            # Обновляем кэш
-            self._status_cache = True
-            self._status_cache_time = current_time
             return True
         
         # Если не запущен, пытаемся запустить
-        centralized_logger.info("🚀 PostgreSQL не запущен, пытаемся запустить...")
+        logger.info("🚀 PostgreSQL не запущен, пытаемся запустить...")
         
         if self.start_postgresql():
             # Ждем запуска
             if self.wait_for_postgresql():
-                # Обновляем кэш
-                self._status_cache = True
-                self._status_cache_time = current_time
                 return True
         
-        # Обновляем кэш (неудачный результат)
-        self._status_cache = False
-        self._status_cache_time = current_time
-        centralized_logger.error("❌ Не удалось запустить PostgreSQL")
+        logger.error("❌ Не удалось запустить PostgreSQL")
         return False
-    
-    def reset_status_cache(self):
-        """Сброс кэша статуса PostgreSQL"""
-        self._status_cache = None
-        self._status_cache_time = 0
     
     def create_database_if_not_exists(self) -> bool:
         """
@@ -548,22 +456,22 @@ class PostgreSQLManager:
             # Проверяем, существует ли БД
             cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (self.database,))
             if cursor.fetchone():
-                centralized_logger.info(f"✅ База данных '{self.database}' уже существует")
+                logger.info(f"✅ База данных '{self.database}' уже существует")
                 cursor.close()
                 conn.close()
                 return True
             
             # Создаем БД
-            centralized_logger.info(f"🔨 Создание базы данных '{self.database}'...")
+            logger.info(f"🔨 Создание базы данных '{self.database}'...")
             cursor.execute(f'CREATE DATABASE "{self.database}"')
-            centralized_logger.info(f"✅ База данных '{self.database}' создана")
+            logger.info(f"✅ База данных '{self.database}' создана")
             
             cursor.close()
             conn.close()
             return True
             
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка создания базы данных: {e}")
+            logger.error(f"❌ Ошибка создания базы данных: {e}")
             return False
     
     def get_postgresql_info(self) -> Dict[str, Any]:
@@ -605,7 +513,7 @@ class PostgreSQLManager:
             }
             
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка получения информации о PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка получения информации о PostgreSQL: {e}")
             return {'error': str(e)}
     
     def stop_postgresql(self) -> bool:
@@ -616,7 +524,7 @@ class PostgreSQLManager:
             bool: True если остановка успешна, False иначе
         """
         try:
-            centralized_logger.info(f"🛑 Остановка PostgreSQL на {self.os_type.upper()}...")
+            logger.info(f"🛑 Остановка PostgreSQL на {self.os_type.upper()}...")
             
             if self.os_type == 'windows':
                 return self._stop_postgresql_windows()
@@ -625,11 +533,11 @@ class PostgreSQLManager:
             elif self.os_type == 'linux':
                 return self._stop_postgresql_linux()
             else:
-                centralized_logger.error(f"❌ Неподдерживаемая ОС: {self.os_type}")
+                logger.error(f"❌ Неподдерживаемая ОС: {self.os_type}")
                 return False
                 
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка остановки PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка остановки PostgreSQL: {e}")
             return False
     
     def _stop_postgresql_windows(self) -> bool:
@@ -639,13 +547,13 @@ class PostgreSQLManager:
             result = subprocess.run(['sc', 'stop', 'postgresql'], 
                                   capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
-                centralized_logger.info("✅ Служба PostgreSQL остановлена")
+                logger.info("✅ Служба PostgreSQL остановлена")
                 return True
             else:
-                centralized_logger.error(f"❌ Ошибка остановки службы: {result.stderr}")
+                logger.error(f"❌ Ошибка остановки службы: {result.stderr}")
                 return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка остановки PostgreSQL на Windows: {e}")
+            logger.error(f"❌ Ошибка остановки PostgreSQL на Windows: {e}")
             return False
     
     def _stop_postgresql_linux(self) -> bool:
@@ -656,7 +564,7 @@ class PostgreSQLManager:
                 result = subprocess.run(['sudo', 'systemctl', 'stop', 'postgresql'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    centralized_logger.info("✅ PostgreSQL остановлен через systemctl")
+                    logger.info("✅ PostgreSQL остановлен через systemctl")
                     return True
             
             # Пытаемся остановить через service
@@ -664,13 +572,13 @@ class PostgreSQLManager:
                 result = subprocess.run(['sudo', 'service', 'postgresql', 'stop'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    centralized_logger.info("✅ PostgreSQL остановлен через service")
+                    logger.info("✅ PostgreSQL остановлен через service")
                     return True
             
-            centralized_logger.error("❌ Не удалось остановить PostgreSQL")
+            logger.error("❌ Не удалось остановить PostgreSQL")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка остановки PostgreSQL на Linux: {e}")
+            logger.error(f"❌ Ошибка остановки PostgreSQL на Linux: {e}")
             return False
     
     def _stop_postgresql_macos(self) -> bool:
@@ -681,7 +589,7 @@ class PostgreSQLManager:
                 result = subprocess.run(['brew', 'services', 'stop', 'postgresql'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    centralized_logger.info("✅ PostgreSQL остановлен через Homebrew")
+                    logger.info("✅ PostgreSQL остановлен через Homebrew")
                     return True
             
             # Пытаемся остановить через pg_ctl
@@ -689,13 +597,13 @@ class PostgreSQLManager:
                 result = subprocess.run(['pg_ctl', 'stop'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    centralized_logger.info("✅ PostgreSQL остановлен через pg_ctl")
+                    logger.info("✅ PostgreSQL остановлен через pg_ctl")
                     return True
             
-            centralized_logger.error("❌ Не удалось остановить PostgreSQL")
+            logger.error("❌ Не удалось остановить PostgreSQL")
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка остановки PostgreSQL на macOS: {e}")
+            logger.error(f"❌ Ошибка остановки PostgreSQL на macOS: {e}")
             return False
     
     def restart_postgresql(self) -> bool:
@@ -706,7 +614,7 @@ class PostgreSQLManager:
             bool: True если перезапуск успешен, False иначе
         """
         try:
-            centralized_logger.info(f"🔄 Перезапуск PostgreSQL на {self.os_type.upper()}...")
+            logger.info(f"🔄 Перезапуск PostgreSQL на {self.os_type.upper()}...")
             
             # Сначала останавливаем
             if self.stop_postgresql():
@@ -716,14 +624,14 @@ class PostgreSQLManager:
                 if self.start_postgresql():
                     # Ждем запуска
                     if self.wait_for_postgresql():
-                        centralized_logger.info("✅ PostgreSQL успешно перезапущен")
+                        logger.info("✅ PostgreSQL успешно перезапущен")
                         return True
             
-            centralized_logger.error("❌ Не удалось перезапустить PostgreSQL")
+            logger.error("❌ Не удалось перезапустить PostgreSQL")
             return False
             
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка перезапуска PostgreSQL: {e}")
+            logger.error(f"❌ Ошибка перезапуска PostgreSQL: {e}")
             return False
 
 
