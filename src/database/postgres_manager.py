@@ -18,12 +18,27 @@ from src.utils.centralized_logger import centralized_logger
 class PostgreSQLManager:
     """Менеджер для управления PostgreSQL"""
     
+    def _get_local_db_path(self) -> str:
+        """
+        Получение абсолютного пути к локальной базе данных
+        База данных находится в src/database/DB_BASE/vkinder_cluster
+        
+        Returns:
+            str: Абсолютный путь к директории базы данных
+        """
+        # Определяем путь относительно файла postgres_manager.py
+        # Файл находится в src/database/, база в src/database/DB_BASE/vkinder_cluster
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        local_data_path = os.path.join(current_file_dir, 'DB_BASE', 'vkinder_cluster')
+        # Преобразуем в абсолютный путь для надежности
+        return os.path.abspath(local_data_path)
+    
     def __init__(self):
         """Инициализация менеджера PostgreSQL"""
         self.host = os.getenv('DB_HOST', 'localhost')
         # Проверяем, есть ли локальная база в проекте
-        project_base_path = os.path.join(os.getcwd(), 'DB_BASE')
-        local_data_path = os.path.join(project_base_path, 'vkinder_cluster')
+        # База теперь находится в src/database/DB_BASE/vkinder_cluster
+        local_data_path = self._get_local_db_path()
         
         # Берем порт из .env, если не указан - определяем автоматически
         env_port = os.getenv('DB_PORT')
@@ -32,9 +47,13 @@ class PostgreSQLManager:
         elif os.path.exists(local_data_path):
             # Локальная база использует порт 5433
             self.port = 5433
+            # Используем print для отладки (только один раз при инициализации)
+            print(f"📁 Локальная база данных найдена: {local_data_path}")
         else:
             # Локальная база использует порт 5433
             self.port = 5433
+            # Используем print для отладки (только если база не найдена)
+            print(f"⚠️ Локальная база данных не найдена по пути: {local_data_path}")
         
         self.database = os.getenv('DB_NAME', 'vkinder_db')
         self.user = os.getenv('DB_USER', 'vkinder_user')
@@ -71,23 +90,42 @@ class PostgreSQLManager:
             bool: True если PostgreSQL запущен, False иначе
         """
         try:
-            # Пробуем подключиться к PostgreSQL
+            # Сначала пробуем подключиться к системной базе 'postgres' для проверки статуса PostgreSQL
+            # Это работает даже если целевая база данных еще не создана
             conn = psycopg2.connect(
                 host=self.host,
                 port=self.port,
-                database=self.database,  # Используем нашу базу данных
+                database='postgres',  # Используем системную базу для проверки статуса
                 user=self.user,
-                password=self.password
+                password=self.password,
+                connect_timeout=5  # Таймаут подключения 5 секунд
             )
             conn.close()
-            centralized_logger.info("✅ PostgreSQL запущен и доступен")
+            # Используем print вместо centralized_logger чтобы избежать циклических зависимостей
+            # Выводим только при первой успешной проверке или при смене статуса
+            if not hasattr(self, '_last_success_time'):
+                print("✅ PostgreSQL запущен и доступен")
+                self._last_success_time = time.time()
             return True
             
         except psycopg2.OperationalError as e:
-            centralized_logger.warning(f"⚠️ PostgreSQL недоступен: {e}")
+            # Используем print вместо centralized_logger чтобы избежать циклических зависимостей
+            # Логируем только один раз в секунду, чтобы не засорять логи
+            current_time = time.time()
+            if not hasattr(self, '_last_warning_time'):
+                self._last_warning_time = 0
+            if current_time - self._last_warning_time > 10:  # Логируем не чаще раза в 10 секунд
+                print(f"⚠️ PostgreSQL недоступен: {e}")
+                self._last_warning_time = current_time
             return False
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка проверки PostgreSQL: {e}")
+            # Используем print вместо centralized_logger чтобы избежать циклических зависимостей
+            current_time = time.time()
+            if not hasattr(self, '_last_error_time'):
+                self._last_error_time = 0
+            if current_time - self._last_error_time > 10:  # Логируем не чаще раза в 10 секунд
+                print(f"❌ Ошибка проверки PostgreSQL: {e}")
+                self._last_error_time = current_time
             return False
     
     def start_postgresql(self) -> bool:
@@ -103,8 +141,8 @@ class PostgreSQLManager:
             if self.os_type == 'windows':
                 return self._start_postgresql_windows()
             elif self.os_type == 'macos':
-                # Проверяем сначала локальную БД в DB_BASE
-                local_data_path = os.path.join('DB_BASE', 'vkinder_cluster')
+                # Проверяем сначала локальную БД в src/database/DB_BASE/vkinder_cluster
+                local_data_path = self._get_local_db_path()
                 if os.path.exists(local_data_path):
                     centralized_logger.info(f"📍 Найдена локальная БД, используем порт {self.port}")
                     return self._start_local_postgres(local_data_path)
@@ -371,8 +409,8 @@ class PostgreSQLManager:
         """Запуск PostgreSQL через Homebrew"""
         try:
             # Сначала проверяем, есть ли локальная база в проекте
-            project_base_path = os.path.join(os.getcwd(), 'DB_BASE')
-            local_data_path = os.path.join(project_base_path, 'vkinder_cluster')
+            # База находится в src/database/DB_BASE/vkinder_cluster
+            local_data_path = self._get_local_db_path()
             
             if os.path.exists(local_data_path):
                 centralized_logger.info("📁 Найдена локальная база данных в проекте")
@@ -467,17 +505,18 @@ class PostgreSQLManager:
         Returns:
             bool: True если PostgreSQL запустился, False иначе
         """
-        centralized_logger.info(f"⏳ Ожидание запуска PostgreSQL (таймаут: {timeout}с)...")
+        # Используем print вместо centralized_logger чтобы избежать циклических зависимостей
+        print(f"⏳ Ожидание запуска PostgreSQL (таймаут: {timeout}с)...")
         
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self.check_postgresql_status():
-                centralized_logger.info("✅ PostgreSQL успешно запущен!")
+                print("✅ PostgreSQL успешно запущен!")
                 return True
             
             time.sleep(2)  # Ждем 2 секунды между проверками
         
-        centralized_logger.error(f"❌ Таймаут ожидания PostgreSQL ({timeout}с)")
+        print(f"❌ Таймаут ожидания PostgreSQL ({timeout}с)")
         return False
     
     def ensure_postgresql_running(self) -> bool:
@@ -487,15 +526,14 @@ class PostgreSQLManager:
         Returns:
             bool: True если PostgreSQL запущен, False иначе
         """
-        import time
-        
         # Проверяем кэш
         current_time = time.time()
         if (self._status_cache is not None and 
             current_time - self._status_cache_time < self._cache_timeout):
             return self._status_cache
         
-        centralized_logger.info("🔍 Проверка статуса PostgreSQL...")
+        # Используем print вместо centralized_logger чтобы избежать циклических зависимостей
+        print("🔍 Проверка статуса PostgreSQL...")
         
         # Проверяем текущий статус
         if self.check_postgresql_status():
@@ -505,7 +543,7 @@ class PostgreSQLManager:
             return True
         
         # Если не запущен, пытаемся запустить
-        centralized_logger.info("🚀 PostgreSQL не запущен, пытаемся запустить...")
+        print("🚀 PostgreSQL не запущен, пытаемся запустить...")
         
         if self.start_postgresql():
             # Ждем запуска
@@ -518,7 +556,7 @@ class PostgreSQLManager:
         # Обновляем кэш (неудачный результат)
         self._status_cache = False
         self._status_cache_time = current_time
-        centralized_logger.error("❌ Не удалось запустить PostgreSQL")
+        print("❌ Не удалось запустить PostgreSQL")
         return False
     
     def reset_status_cache(self):
@@ -548,7 +586,8 @@ class PostgreSQLManager:
             # Проверяем, существует ли БД
             cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (self.database,))
             if cursor.fetchone():
-                centralized_logger.info(f"✅ База данных '{self.database}' уже существует")
+                # DEBUG: база уже существует - это нормально, не логируем как INFO
+                centralized_logger.debug(f"База данных '{self.database}' уже существует (проверка при инициализации)")
                 cursor.close()
                 conn.close()
                 return True

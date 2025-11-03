@@ -35,14 +35,14 @@ if tokens_path not in sys.path:
 # Исправляем импорты для работы как отдельного скрипта
 try:
     from .models import (
-        Base, VKUser, Photo, Favorite, Blacklisted, SearchHistory, 
-        UserSettings, BotLog, BotMessage
+        Base, VKUser, Photo, Favorite, Blacklisted, 
+        UserSettings
     )
 except ImportError:
     # Если относительные импорты не работают, используем абсолютные
     from models import (
-        Base, VKUser, Photo, Favorite, Blacklisted, SearchHistory, 
-        UserSettings, BotLog, BotMessage
+        Base, VKUser, Photo, Favorite, Blacklisted, 
+        UserSettings
     )
 import os
 from dotenv import load_dotenv
@@ -72,6 +72,8 @@ class DatabaseInterface:
         """Инициализация интерфейса базы данных"""
         self.engine = None
         self.Session = None
+        self.is_available = False  # Флаг доступности БД
+        self._connection_error = None  # Сохраняем ошибку подключения для отладки
         self._setup_connection()
         self._setup_encryption()
     
@@ -81,15 +83,21 @@ class DatabaseInterface:
             # Проверяем и запускаем PostgreSQL если нужно
             postgres_manager = PostgreSQLManager()
             if not postgres_manager.ensure_postgresql_running():
+                error_msg = "PostgreSQL недоступен"
+                self._connection_error = error_msg
+                self.is_available = False
                 # Используем print вместо centralized_logger чтобы избежать рекурсии
-                print("❌ Не удалось запустить PostgreSQL")
-                raise Exception("PostgreSQL недоступен")
+                print(f"⚠️ {error_msg} - программа будет работать без БД")
+                return
             
             # Создаем БД если не существует
             if not postgres_manager.create_database_if_not_exists():
+                error_msg = "База данных недоступна"
+                self._connection_error = error_msg
+                self.is_available = False
                 # Используем print вместо centralized_logger чтобы избежать рекурсии
-                print("❌ Не удалось создать базу данных")
-                raise Exception("База данных недоступна")
+                print(f"⚠️ {error_msg} - программа будет работать без БД")
+                return
             
             # Создаем подключение к PostgreSQL используя параметры из postgres_manager
             # postgres_manager автоматически определяет правильный порт
@@ -103,13 +111,27 @@ class DatabaseInterface:
             self.engine = create_engine(database_url, echo=False)
             self.Session = sessionmaker(bind=self.engine)
             
-            # Используем print вместо centralized_logger чтобы избежать рекурсии
-            print("✅ Интерфейс базы данных инициализирован с автоматическим запуском PostgreSQL")
+            # Проверяем подключение
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                self.is_available = True
+                self._connection_error = None
+                # Используем print вместо centralized_logger чтобы избежать рекурсии
+                print("✅ Интерфейс базы данных инициализирован с автоматическим запуском PostgreSQL")
+            except Exception as conn_error:
+                error_msg = f"Ошибка проверки подключения: {conn_error}"
+                self._connection_error = error_msg
+                self.is_available = False
+                print(f"⚠️ {error_msg} - программа будет работать без БД")
             
         except Exception as e:
+            # Не выбрасываем исключение, просто помечаем БД как недоступную
+            error_msg = f"Ошибка инициализации интерфейса БД: {e}"
+            self._connection_error = error_msg
+            self.is_available = False
             # Используем print вместо centralized_logger чтобы избежать рекурсии
-            print(f"❌ Ошибка инициализации интерфейса БД: {e}")
-            raise
+            print(f"⚠️ {error_msg} - программа будет работать без БД")
     
     def _setup_encryption(self):
         """Настройка системы шифрования токенов"""
@@ -151,13 +173,26 @@ class DatabaseInterface:
     @contextmanager
     def get_session(self):
         """Контекстный менеджер для работы с сессией БД"""
+        if not self.is_available or not self.Session:
+            # Возвращаем контекстный менеджер-заглушку, который ничего не делает
+            class DummySession:
+                def __getattr__(self, name):
+                    return lambda *args, **kwargs: None
+            yield DummySession()
+            return
+        
         session = self.Session()
         try:
             yield session
             session.commit()
         except Exception as e:
             session.rollback()
-            centralized_logger.error(f"Ошибка в сессии БД: {e}")
+            # Если это ошибка подключения, помечаем БД как недоступную
+            if isinstance(e, (OperationalError, SQLAlchemyError)):
+                self.is_available = False
+                self._connection_error = str(e)
+                centralized_logger.warning(f"⚠️ БД стала недоступна: {e}", user_id=0)
+            centralized_logger.error(f"Ошибка в сессии БД: {e}", user_id=0)
             raise
         finally:
             session.close()
@@ -191,13 +226,6 @@ class DatabaseInterface:
             centralized_logger.info("🔨 Создание таблиц базы данных...")
             Base.metadata.create_all(self.engine)
             centralized_logger.info("✅ Все таблицы созданы успешно")
-            
-            # Логируем действие в БД
-            self.add_bot_log(
-                vk_user_id=0,  # Системный лог
-                log_level="info",
-                log_message="Все таблицы базы данных созданы"
-            )
             return True
             
         except Exception as e:
@@ -215,16 +243,6 @@ class DatabaseInterface:
             centralized_logger.info("🗑️ Удаление всех таблиц...")
             Base.metadata.drop_all(self.engine)
             centralized_logger.info("✅ Все таблицы удалены")
-            
-            # Логируем действие в БД (если таблица bot_logs еще существует)
-            try:
-                self.add_bot_log(
-                    vk_user_id=0,  # Системный лог
-                    log_level="warning",
-                    log_message="Все таблицы базы данных удалены"
-                )
-            except:
-                pass  # Игнорируем ошибку, если таблица уже удалена
             return True
             
         except Exception as e:
@@ -269,7 +287,7 @@ class DatabaseInterface:
             centralized_logger.info("🧹 Очистка всех таблиц...")
             
             # Список всех моделей в правильном порядке (с учетом внешних ключей)
-            models = [BotMessage, BotLog, SearchHistory, Favorite, Blacklisted, 
+            models = [Favorite, Blacklisted, 
                      UserSettings, Photo, VKUser]
             
             with self.get_session() as session:
@@ -281,13 +299,6 @@ class DatabaseInterface:
                         centralized_logger.error(f"Ошибка очистки таблицы {model.__tablename__}: {e}")
             
             centralized_logger.info("✅ Все таблицы очищены")
-            
-            # Логируем действие в БД
-            self.add_bot_log(
-                vk_user_id=0,  # Системный лог
-                log_level="info",
-                log_message="Все таблицы базы данных очищены"
-            )
             return True
             
         except Exception as e:
@@ -353,10 +364,7 @@ class DatabaseInterface:
             "photos": Photo,
             "favorites": Favorite,
             "blacklisted": Blacklisted,
-            "search_history": SearchHistory,
-            "user_settings": UserSettings,
-            "bot_logs": BotLog,
-            "bot_messages": BotMessage
+            "user_settings": UserSettings
         }
         return table_models.get(table_name)
     
@@ -414,13 +422,6 @@ class DatabaseInterface:
                 session.add(user)
                 session.commit()
                 centralized_logger.info(f"✅ Пользователь {vk_user_id} ({first_name} {last_name}) добавлен")
-                
-                # Логируем действие в БД
-                self.add_bot_log(
-                    vk_user_id=0,  # Системный лог
-                    log_level="info",
-                    log_message=f"Пользователь {vk_user_id} ({first_name} {last_name}) добавлен в БД"
-                )
                 return True
                 
         except IntegrityError as e:
@@ -472,13 +473,6 @@ class DatabaseInterface:
                         setattr(user, key, value)
                 
                 centralized_logger.info(f"✅ Пользователь {vk_user_id} обновлен")
-                
-                # Логируем действие в БД
-                self.add_bot_log(
-                    vk_user_id=0,  # Системный лог
-                    log_level="info",
-                    log_message=f"Пользователь {vk_user_id} обновлен в БД"
-                )
                 return True
                 
         except Exception as e:
@@ -505,154 +499,11 @@ class DatabaseInterface:
                 session.delete(user)
                 session.commit()
                 centralized_logger.info(f"✅ Пользователь {vk_user_id} удален")
-                
-                # Логируем действие в БД
-                self.add_bot_log(
-                    vk_user_id=0,  # Системный лог
-                    log_level="info",
-                    log_message=f"Пользователь {vk_user_id} удален из БД"
-                )
                 return True
                 
         except Exception as e:
             centralized_logger.error(f"❌ Ошибка удаления пользователя {vk_user_id}: {e}")
             return False
-    
-    # === ОПЕРАЦИИ С ЛОГАМИ ===
-    
-    def add_bot_log(self, vk_user_id: int, log_level: str, log_message: str) -> bool:
-        """
-        Добавление лога в базу данных
-        
-        Args:
-            vk_user_id (int): ID пользователя VK (0 для системных логов)
-            log_level (str): Уровень логирования
-            log_message (str): Текст лога
-            
-        Returns:
-            bool: True если добавление успешно, False иначе
-        """
-        try:
-            with self.get_session() as session:
-                # Нормализуем уровень логирования (всегда UPPERCASE)
-                normalized_level = log_level.upper()
-                
-                log_entry = BotLog(
-                    vk_user_id=vk_user_id,
-                    log_level=normalized_level,
-                    log_message=log_message
-                )
-                session.add(log_entry)
-                # Убираем логирование чтобы избежать рекурсии
-                return True
-                
-        except Exception as e:
-            # Используем print вместо centralized_logger чтобы избежать рекурсии
-            print(f"❌ Ошибка добавления лога: {e}")
-            return False
-    
-    def get_bot_logs(self, vk_user_id: int = 0, log_level: str = None, limit: int = 100) -> List[BotLog]:
-        """
-        Получение логов бота
-        
-        Args:
-            vk_user_id (int): ID пользователя VK (0 для всех)
-            log_level (str): Уровень логирования
-            limit (int): Максимальное количество записей
-            
-        Returns:
-            List[BotLog]: Список логов
-        """
-        try:
-            with self.get_session() as session:
-                query = session.query(BotLog)
-                
-                if vk_user_id != 0:
-                    query = query.filter(BotLog.vk_user_id == vk_user_id)
-                
-                if log_level:
-                    query = query.filter(BotLog.log_level == log_level)
-                
-                logs = query.order_by(BotLog.created_at.desc()).limit(limit).all()
-                # Преобразуем объекты в словари для избежания проблем с сессией
-                result = []
-                for log in logs:
-                    result.append({
-                        'id': log.id,
-                        'vk_user_id': log.vk_user_id,
-                        'log_level': log.log_level,
-                        'log_message': log.log_message,
-                        'created_at': log.created_at
-                    })
-                return result
-                
-        except Exception as e:
-            centralized_logger.error(f"❌ Ошибка получения логов: {e}")
-            return []
-    
-    # === ОПЕРАЦИИ С СООБЩЕНИЯМИ ===
-    
-    def add_bot_message(self, vk_user_id: int, message_type: str, message_text: str) -> bool:
-        """
-        Добавление сообщения бота
-        
-        Args:
-            vk_user_id (int): ID пользователя VK
-            message_type (str): Тип сообщения (command, response, error)
-            message_text (str): Текст сообщения
-            
-        Returns:
-            bool: True если добавление успешно, False иначе
-        """
-        try:
-            with self.get_session() as session:
-                message = BotMessage(
-                    vk_user_id=vk_user_id,
-                    message_type=message_type,
-                    message_text=message_text
-                )
-                session.add(message)
-                centralized_logger.debug(f"Сообщение добавлено: {message_type} - {message_text[:50]}...")
-                return True
-                
-        except Exception as e:
-            centralized_logger.error(f"❌ Ошибка добавления сообщения: {e}")
-            return False
-    
-    def get_user_messages(self, vk_user_id: int, limit: int = 50) -> List[BotMessage]:
-        """
-        Получение сообщений пользователя
-        
-        Args:
-            vk_user_id (int): ID пользователя VK
-            limit (int): Максимальное количество сообщений
-            
-        Returns:
-            List[BotMessage]: Список сообщений
-        """
-        try:
-            with self.get_session() as session:
-                messages = (session.query(BotMessage)
-                          .filter(BotMessage.vk_user_id == vk_user_id)
-                          .order_by(BotMessage.sent_at.desc())
-                          .limit(limit)
-                          .all())
-                # Преобразуем объекты в словари для избежания проблем с сессией
-                result = []
-                for msg in messages:
-                    result.append({
-                        'id': msg.id,
-                        'vk_user_id': msg.vk_user_id,
-                        'message_type': msg.message_type,
-                        'message_text': msg.message_text,
-                        'sent_at': msg.sent_at
-                    })
-                return result
-                
-        except Exception as e:
-            centralized_logger.error(f"❌ Ошибка получения сообщений пользователя {vk_user_id}: {e}")
-            return []
-    
     # === ОПЕРАЦИИ С ИЗБРАННЫМ ===
     
     def add_favorite(self, user_vk_id: int, favorite_vk_id: int) -> bool:
@@ -685,13 +536,6 @@ class DatabaseInterface:
                 session.add(favorite)
                 session.commit()
                 centralized_logger.info(f"✅ Пользователь {favorite_vk_id} добавлен в избранное к {user_vk_id}")
-                
-                # Логируем действие в БД
-                self.add_bot_log(
-                    vk_user_id=0,  # Системный лог
-                    log_level="info",
-                    log_message=f"Пользователь {favorite_vk_id} добавлен в избранное к {user_vk_id}"
-                )
                 return True
                 
         except Exception as e:
@@ -755,13 +599,6 @@ class DatabaseInterface:
                 session.delete(favorite)
                 session.commit()
                 centralized_logger.info(f"✅ Пользователь {favorite_vk_id} удален из избранного у {user_vk_id}")
-                
-                # Логируем действие в БД
-                self.add_bot_log(
-                    vk_user_id=0,  # Системный лог
-                    log_level="info",
-                    log_message=f"Пользователь {favorite_vk_id} удален из избранного у {user_vk_id}"
-                )
                 return True
                 
         except Exception as e:
@@ -918,15 +755,8 @@ class DatabaseInterface:
                     centralized_logger.error(f"❌ Ошибка получения количества просмотренных фото: {e}")
                     stats['viewed_photos'] = 0
                 
-                # Количество поисковых сессий
-                try:
-                    search_sessions = session.query(SearchHistory).filter(
-                        SearchHistory.user_vk_id == user_id
-                    ).count()
-                    stats['search_sessions'] = search_sessions
-                except Exception as e:
-                    centralized_logger.error(f"❌ Ошибка получения количества поисков: {e}")
-                    stats['search_sessions'] = 0
+                # Количество поисковых сессий (таблица search_history удалена)
+                stats['search_sessions'] = 0
             
             centralized_logger.info(f"✅ Статистика пользователя {user_id} получена: {len(stats)} показателей")
             return stats
@@ -934,9 +764,165 @@ class DatabaseInterface:
         except Exception as e:
             centralized_logger.error(f"❌ Ошибка получения статистики пользователя: {e}")
             return {}
+    
+    def count_records(
+        self,
+        model_class,
+        filters: Optional[Dict[str, Any]] = None,
+        date_from: Optional[datetime] = None,
+        date_field_primary: Optional[str] = None,
+        date_field_fallback: Optional[str] = None,
+        distinct_field: Optional[str] = None,
+        user_id: Optional[int] = None,
+        user_field: Optional[str] = None
+    ) -> int:
+        """
+        Универсальная функция для подсчета записей в базе данных с поддержкой фильтров
+        
+        Args:
+            model_class: Класс модели SQLAlchemy (например, Photo, Favorite, Blacklisted)
+            filters: Словарь с дополнительными фильтрами {поле: значение}
+            date_from: Дата начала периода для фильтрации по дате
+            date_field_primary: Основное поле даты (например, 'updated_at', 'token_updated_at')
+            date_field_fallback: Резервное поле даты (например, 'created_at')
+            distinct_field: Поле для подсчета уникальных значений (например, 'vk_user_id')
+            user_id: ID пользователя для фильтрации по полю user_field
+            user_field: Название поля для фильтрации по user_id (например, 'user_vk_id', 'found_by_user_id')
+        
+        Returns:
+            int: Количество записей, соответствующих фильтрам
+        
+        Примеры использования:
+            # Подсчет всех фото
+            count = db.count_records(Photo)
+            
+            # Подсчет фото пользователя за сегодня
+            today = datetime.combine(datetime.now().date(), time.min)
+            count = db.count_records(
+                Photo,
+                date_from=today,
+                date_field_primary='updated_at',
+                date_field_fallback='created_at',
+                user_id=12345,
+                user_field='found_by_user_id'
+            )
+            
+            # Подсчет уникальных пользователей по фото
+            count = db.count_records(
+                Photo,
+                distinct_field='vk_user_id',
+                user_id=12345,
+                user_field='found_by_user_id'
+            )
+        """
+        try:
+            with self.get_session() as session:
+                from sqlalchemy import func, or_, and_
+                from datetime import datetime as dt, time as _time
+                
+                # Начинаем с базового запроса
+                if distinct_field:
+                    # Если нужно считать уникальные значения
+                    attr = getattr(model_class, distinct_field)
+                    query = session.query(func.count(func.distinct(attr)))
+                else:
+                    # Обычный подсчет
+                    query = session.query(func.count(model_class.id))
+                
+                # Применяем фильтр по user_id если указан
+                if user_id is not None and user_field:
+                    user_attr = getattr(model_class, user_field)
+                    query = query.filter(user_attr == user_id)
+                
+                # Применяем дополнительные фильтры
+                if filters:
+                    for field_name, value in filters.items():
+                        if hasattr(model_class, field_name):
+                            attr = getattr(model_class, field_name)
+                            if value is None:
+                                query = query.filter(attr.is_(None))
+                            elif isinstance(value, dict):
+                                # Специальные фильтры (например, {'isnot': None})
+                                if 'isnot' in value:
+                                    query = query.filter(attr.isnot(value['isnot']))
+                                elif 'in' in value:
+                                    query = query.filter(attr.in_(value['in']))
+                                elif 'not_in' in value:
+                                    query = query.filter(~attr.in_(value['not_in']))
+                            else:
+                                query = query.filter(attr == value)
+                
+                # Применяем фильтр по дате
+                if date_from is not None:
+                    if date_field_primary and date_field_fallback:
+                        # Используем primary поле, если оно не NULL, иначе fallback
+                        primary_attr = getattr(model_class, date_field_primary)
+                        fallback_attr = getattr(model_class, date_field_fallback)
+                        query = query.filter(
+                            or_(
+                                primary_attr >= date_from,
+                                and_(primary_attr.is_(None), fallback_attr >= date_from)
+                            )
+                        )
+                    elif date_field_primary:
+                        # Только primary поле
+                        primary_attr = getattr(model_class, date_field_primary)
+                        query = query.filter(primary_attr >= date_from)
+                    elif date_field_fallback:
+                        # Только fallback поле
+                        fallback_attr = getattr(model_class, date_field_fallback)
+                        query = query.filter(fallback_attr >= date_from)
+                
+                result = query.scalar()
+                return result if result is not None else 0
+                
+        except Exception as e:
+            centralized_logger.error(f"❌ Ошибка подсчета записей {model_class.__name__}: {e}", user_id=0)
+            return 0
 
 
     # === МЕТОДЫ ШИФРОВАНИЯ И ДЕШИФРОВАНИЯ ТОКЕНОВ ===
+    
+    def _mask_token(self, token: str) -> str:
+        """
+        Маскировка токена для безопасного логирования
+        Адаптивная маскировка в зависимости от длины токена:
+        - 16+ символов: 8***5
+        - 13-15 символов: 6***4
+        - 11-12 символов: 4***4
+        - 9-10 символов: 3***3
+        - 8 символов: 2***3
+        - 5-7 символов: 1***1
+        - 4 символа: 1***
+        - менее 4: ***
+        
+        Args:
+            token: Токен для маскировки
+            
+        Returns:
+            str: Маскированный токен
+        """
+        if not token:
+            return "(пустой)"
+        
+        length = len(token)
+        
+        if length >= 16:
+            return f"{token[:8]}***{token[-5:]}"
+        elif length >= 13:
+            return f"{token[:6]}***{token[-4:]}"
+        elif length >= 11:
+            return f"{token[:4]}***{token[-4:]}"
+        elif length >= 9:
+            return f"{token[:3]}***{token[-3:]}"
+        elif length >= 8:
+            return f"{token[:2]}***{token[-3:]}"
+        elif length >= 5:
+            return f"{token[:1]}***{token[-1:]}"
+        elif length >= 4:
+            return f"{token[:1]}***"
+        else:
+            return "***"
     
     def encrypt_access_token(self, access_token: str) -> str:
         """
@@ -949,27 +935,50 @@ class DatabaseInterface:
             str: Зашифрованный токен
         """
         try:
+            # ⚠️ WARNING: Логирование открытого токена для отладки (маскированный)
+            masked_token = self._mask_token(access_token)
+            centralized_logger.warning(f"🔐 [TOKEN_ENCRYPT] ШИФРУЕМ ACCESS ТОКЕН: Открытый токен: {masked_token}", user_id=0)
+            
             encrypted_token = self.cipher.encrypt(access_token.encode())
-            return encrypted_token.decode()
+            encrypted_str = encrypted_token.decode()
+            
+            # ⚠️ WARNING: Логирование зашифрованного токена для отладки (маскированный)
+            masked_encrypted = self._mask_token(encrypted_str)
+            centralized_logger.warning(f"🔐 [TOKEN_ENCRYPT] РЕЗУЛЬТАТ ШИФРОВАНИЯ: Зашифрованный токен: {masked_encrypted}", user_id=0)
+            
+            return encrypted_str
         except Exception as e:
             centralized_logger.error(f"❌ Ошибка шифрования access токена: {e}")
             raise
     
-    def decrypt_access_token(self, encrypted_token: str) -> str:
+    def decrypt_access_token(self, encrypted_token: str, user_id: int = 0) -> str:
         """
         Расшифровка access токена
         
         Args:
             encrypted_token: Зашифрованный токен
+            user_id: ID пользователя (для логирования, опционально)
             
         Returns:
             str: Расшифрованный токен
         """
         try:
+            # Логирование начала расшифровки
+            masked_encrypted = self._mask_token(encrypted_token)
+            centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Начало расшифровки: зашифрованный токен (маскированный): {masked_encrypted}, длина={len(encrypted_token)}", user_id=user_id)
+            
+            # Выполняем расшифровку через Fernet cipher
+            centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Вызываем cipher.decrypt() для расшифровки токена", user_id=user_id)
             decrypted_token = self.cipher.decrypt(encrypted_token.encode())
-            return decrypted_token.decode()
+            decrypted_str = decrypted_token.decode()
+            
+            # Логирование результата расшифровки
+            masked_decrypted = self._mask_token(decrypted_str)
+            centralized_logger.debug(f"✅ [TOKEN_DECRYPT] Расшифровка успешна: расшифрованный токен (маскированный): {masked_decrypted}, длина={len(decrypted_str)}", user_id=user_id)
+            
+            return decrypted_str
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка расшифровки access токена: {e}")
+            centralized_logger.error(f"❌ [TOKEN_DECRYPT] Ошибка расшифровки access токена: {e}", user_id=user_id)
             raise
     
     def encrypt_refresh_token(self, refresh_token: str) -> str:
@@ -983,27 +992,50 @@ class DatabaseInterface:
             str: Зашифрованный refresh токен
         """
         try:
+            # ⚠️ WARNING: Логирование открытого refresh токена для отладки (маскированный)
+            masked_token = self._mask_token(refresh_token)
+            centralized_logger.warning(f"🔐 [TOKEN_ENCRYPT] ШИФРУЕМ REFRESH ТОКЕН: Открытый токен: {masked_token}", user_id=0)
+            
             encrypted_token = self.cipher.encrypt(refresh_token.encode())
-            return encrypted_token.decode()
+            encrypted_str = encrypted_token.decode()
+            
+            # ⚠️ WARNING: Логирование зашифрованного refresh токена для отладки (маскированный)
+            masked_encrypted = self._mask_token(encrypted_str)
+            centralized_logger.warning(f"🔐 [TOKEN_ENCRYPT] РЕЗУЛЬТАТ ШИФРОВАНИЯ: Зашифрованный refresh токен: {masked_encrypted}", user_id=0)
+            
+            return encrypted_str
         except Exception as e:
             centralized_logger.error(f"❌ Ошибка шифрования refresh токена: {e}")
             raise
     
-    def decrypt_refresh_token(self, encrypted_token: str) -> str:
+    def decrypt_refresh_token(self, encrypted_token: str, user_id: int = 0) -> str:
         """
         Расшифровка refresh токена
         
         Args:
             encrypted_token: Зашифрованный refresh токен
+            user_id: ID пользователя (для логирования, опционально)
             
         Returns:
             str: Расшифрованный refresh токен
         """
         try:
+            # Логирование начала расшифровки
+            masked_encrypted = self._mask_token(encrypted_token)
+            centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Начало расшифровки refresh токена: зашифрованный токен (маскированный): {masked_encrypted}, длина={len(encrypted_token)}", user_id=user_id)
+            
+            # Выполняем расшифровку через Fernet cipher
+            centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Вызываем cipher.decrypt() для расшифровки refresh токена", user_id=user_id)
             decrypted_token = self.cipher.decrypt(encrypted_token.encode())
-            return decrypted_token.decode()
+            decrypted_str = decrypted_token.decode()
+            
+            # Логирование результата расшифровки
+            masked_decrypted = self._mask_token(decrypted_str)
+            centralized_logger.debug(f"✅ [TOKEN_DECRYPT] Расшифровка refresh токена успешна: расшифрованный токен (маскированный): {masked_decrypted}, длина={len(decrypted_str)}", user_id=user_id)
+            
+            return decrypted_str
         except Exception as e:
-            centralized_logger.error(f"❌ Ошибка расшифровки refresh токена: {e}")
+            centralized_logger.error(f"❌ [TOKEN_DECRYPT] Ошибка расшифровки refresh токена: {e}", user_id=user_id)
             raise
     
     def hash_refresh_token(self, refresh_token: str, salt: Optional[str] = None) -> Tuple[str, str]:
@@ -1065,6 +1097,11 @@ class DatabaseInterface:
             Dict: Словарь с зашифрованными данными
         """
         try:
+            # ⚠️ WARNING: Логирование открытых токенов перед шифрованием (маскированные)
+            masked_access = self._mask_token(access_token)
+            masked_refresh = self._mask_token(refresh_token)
+            centralized_logger.warning(f"📝 [TOKEN_GENERATE] ПОДГОТОВКА К СОХРАНЕНИЮ: Открытый access_token: {masked_access}, Открытый refresh_token: {masked_refresh}", user_id=0)
+            
             # Шифруем access токен
             encrypted_access = self.encrypt_access_token(access_token)
             
@@ -1139,6 +1176,11 @@ class DatabaseInterface:
             bool: True если сохранение успешно, False иначе
         """
         try:
+            # Логируем полученные токены ДО шифрования
+            masked_access_before = self._mask_token(access_token)
+            masked_refresh_before = self._mask_token(refresh_token)
+            centralized_logger.info(f"💾 [TOKEN_SAVE] ПОЛУЧИЛИ ТОКЕНЫ для пользователя {vk_user_id}: access_token={masked_access_before} (тип: ACCESS_TOKEN), refresh_token={masked_refresh_before} (тип: REFRESH_TOKEN)", user_id=vk_user_id)
+            
             # Генерируем зашифрованные данные используя встроенные методы
             token_data = self.generate_token_data(access_token, refresh_token, expires_in)
             
@@ -1192,6 +1234,11 @@ class DatabaseInterface:
                 user_settings.token_expires_at = token_data['token_expires_at']
                 user_settings.token_updated_at = token_data['token_updated_at']
                 
+                # ⚠️ WARNING: Логирование зашифрованных данных, которые записываем в БД (маскированные)
+                masked_access_enc = self._mask_token(token_data['encrypted_access_token'])
+                masked_refresh_enc = self._mask_token(token_data['encrypted_refresh_token'])
+                centralized_logger.warning(f"💾 [TOKEN_SAVE] ЗАПИСЫВАЕМ В БД для пользователя {vk_user_id}: encrypted_access_token={masked_access_enc}, encrypted_refresh_token={masked_refresh_enc}", user_id=vk_user_id)
+                
                 centralized_logger.debug(f"✅ Токены для пользователя {vk_user_id} обновлены в сессии")
             
             centralized_logger.info(f"✅ Токены пользователя {vk_user_id} сохранены в зашифрованном виде")
@@ -1232,19 +1279,32 @@ class DatabaseInterface:
                 
                 centralized_logger.debug(f"✅ Зашифрованный access токен пользователя {vk_user_id} найден в БД", user_id=vk_user_id)
                 
-                # Проверяем, не истек ли токен
+                # DEBUG: Логирование зашифрованного токена из БД перед расшифровкой (маскированный)
+                masked_enc = self._mask_token(user_settings.encrypted_access_token)
+                centralized_logger.info(f"📥 [TOKEN_READ] ПОЛУЧИЛИ ИЗ БД для пользователя {vk_user_id}: encrypted_access_token={masked_enc} (тип: ENCRYPTED_ACCESS_TOKEN)", user_id=vk_user_id)
+                
+                # Расшифровываем токен используя встроенный метод (даже если он истек, чтобы видеть результат)
+                centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Начинаем расшифровку access токена пользователя {vk_user_id}...", user_id=vk_user_id)
+                centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Вызываем decrypt_access_token() с зашифрованным токеном длиной {len(user_settings.encrypted_access_token)} символов", user_id=vk_user_id)
+                
+                decrypted_token = self.decrypt_access_token(user_settings.encrypted_access_token, user_id=vk_user_id)
+                
+                # Дополнительное логирование результата (decrypt_access_token уже логирует детали)
+                if decrypted_token:
+                    masked_dec = self._mask_token(decrypted_token)
+                    centralized_logger.info(f"📤 [TOKEN_DECRYPT] РАСШИФРОВАЛИ для пользователя {vk_user_id}: access_token={masked_dec} (тип: ACCESS_TOKEN), длина={len(decrypted_token)}", user_id=vk_user_id)
+                else:
+                    centralized_logger.error(f"❌ [TOKEN_DECRYPT] РАСШИФРОВКА НЕУДАЧНА для пользователя {vk_user_id}: метод decrypt_access_token вернул None", user_id=vk_user_id)
+                
+                # Проверяем, не истек ли токен (после расшифровки, чтобы видеть расшифрованный токен в логах)
                 if user_settings.token_expires_at:
                     centralized_logger.debug(f"🔍 Проверяем срок действия токена пользователя {vk_user_id}: {user_settings.token_expires_at}", user_id=vk_user_id)
                     if self.is_token_expired(user_settings.token_expires_at):
-                        centralized_logger.info(f"⚠️ Токен пользователя {vk_user_id} истек", user_id=vk_user_id)
+                        centralized_logger.info(f"⚠️ Токен пользователя {vk_user_id} истек (расшифрованный токен показан выше)", user_id=vk_user_id)
                         return None
                     centralized_logger.debug(f"✅ Токен пользователя {vk_user_id} не истек", user_id=vk_user_id)
                 else:
                     centralized_logger.debug(f"⚠️ Время истечения токена пользователя {vk_user_id} не установлено", user_id=vk_user_id)
-                
-                # Расшифровываем токен используя встроенный метод
-                centralized_logger.debug(f"🔍 Начинаем расшифровку access токена пользователя {vk_user_id}...", user_id=vk_user_id)
-                decrypted_token = self.decrypt_access_token(user_settings.encrypted_access_token)
                 
                 if decrypted_token:
                     centralized_logger.debug(f"✅ Access токен пользователя {vk_user_id} успешно расшифрован и получен из БД", user_id=vk_user_id)
@@ -1304,10 +1364,22 @@ class DatabaseInterface:
                     centralized_logger.debug(f"Refresh токен пользователя {vk_user_id} не найден в БД")
                     return None
                 
-                # Расшифровываем токен используя встроенный метод
-                decrypted_token = self.decrypt_refresh_token(user_settings.encrypted_refresh_token)
+                # DEBUG: Логирование зашифрованного refresh токена из БД перед расшифровкой (маскированный)
+                masked_refresh_enc = self._mask_token(user_settings.encrypted_refresh_token)
+                centralized_logger.info(f"📥 [TOKEN_READ] ПОЛУЧИЛИ ИЗ БД для пользователя {vk_user_id}: encrypted_refresh_token={masked_refresh_enc} (тип: ENCRYPTED_REFRESH_TOKEN)", user_id=vk_user_id)
                 
-                centralized_logger.debug(f"Refresh токен пользователя {vk_user_id} успешно получен из БД")
+                # Расшифровываем токен используя встроенный метод
+                centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Начинаем расшифровку refresh токена пользователя {vk_user_id}...", user_id=vk_user_id)
+                centralized_logger.debug(f"🔓 [TOKEN_DECRYPT] Вызываем decrypt_refresh_token() с зашифрованным токеном длиной {len(user_settings.encrypted_refresh_token)} символов", user_id=vk_user_id)
+                
+                decrypted_token = self.decrypt_refresh_token(user_settings.encrypted_refresh_token, user_id=vk_user_id)
+                
+                # Дополнительное логирование результата
+                if decrypted_token:
+                    masked_dec = self._mask_token(decrypted_token)
+                    centralized_logger.info(f"📤 [TOKEN_DECRYPT] РАСШИФРОВАЛИ для пользователя {vk_user_id}: refresh_token={masked_dec} (тип: REFRESH_TOKEN), длина={len(decrypted_token)}", user_id=vk_user_id)
+                
+                centralized_logger.debug(f"✅ Refresh токен пользователя {vk_user_id} успешно получен из БД", user_id=vk_user_id)
                 return decrypted_token
                 
         except Exception as e:
@@ -1494,26 +1566,78 @@ class DatabaseInterface:
         """
         try:
             with self.get_session() as session:
+                # Проверяем существование пользователя
+                user = session.query(VKUser).filter(
+                    VKUser.vk_user_id == vk_user_id
+                ).first()
+                
+                # Если пользователь не существует, создаем его
+                # Для администратора группы (ID 900000009) используем специальные данные
+                GROUP_ADMIN_USER_ID = 900000009
+                if not user:
+                    if vk_user_id == GROUP_ADMIN_USER_ID:
+                        # Создаем администратора группы с указанными данными
+                        centralized_logger.info(f"🔨 Создание администратора группы с ID {vk_user_id}", user_id=0)
+                        user = VKUser(
+                            vk_user_id=GROUP_ADMIN_USER_ID,
+                            first_name="Группа",
+                            last_name="Администратор",
+                            age=99,
+                            sex=0,
+                            city="Москва",
+                            city_id=1
+                        )
+                    else:
+                        # Для обычных пользователей создаем с минимальными данными
+                        centralized_logger.info(f"🔨 Создание пользователя с ID {vk_user_id}", user_id=vk_user_id)
+                        user = VKUser(
+                            vk_user_id=vk_user_id,
+                            first_name="Пользователь",
+                            last_name="Неизвестный"
+                        )
+                    session.add(user)
+                    session.flush()  # Получаем ID пользователя
+                    centralized_logger.info(f"✅ Пользователь {vk_user_id} создан", user_id=vk_user_id if vk_user_id != GROUP_ADMIN_USER_ID else 0)
+                
+                # Проверяем существование настроек пользователя
                 user_settings = session.query(UserSettings).filter(
                     UserSettings.vk_user_id == vk_user_id
                 ).first()
                 
+                # Если настройки не найдены, создаем их
                 if not user_settings:
-                    centralized_logger.error(f"❌ Настройки пользователя {vk_user_id} не найдены")
-                    return False
+                    centralized_logger.info(f"🔨 Создание настроек для пользователя {vk_user_id}", user_id=vk_user_id if vk_user_id != GROUP_ADMIN_USER_ID else 0)
+                    user_settings = UserSettings(
+                        vk_user_id=vk_user_id,
+                        min_age=18,
+                        max_age=35
+                    )
+                    session.add(user_settings)
+                    session.flush()
+                    centralized_logger.info(f"✅ Настройки пользователя {vk_user_id} созданы", user_id=vk_user_id if vk_user_id != GROUP_ADMIN_USER_ID else 0)
                 
                 # Обновляем access токен если предоставлен (используем встроенное шифрование)
                 if access_token:
+                    masked_access_before = self._mask_token(access_token)
+                    centralized_logger.info(f"💾 [TOKEN_UPDATE] ПОЛУЧИЛИ ACCESS TOKEN для пользователя {vk_user_id}: access_token={masked_access_before} (тип: ACCESS_TOKEN)", user_id=vk_user_id)
                     encrypted_access = self.encrypt_access_token(access_token)
                     user_settings.encrypted_access_token = encrypted_access
+                    # ⚠️ WARNING: Логирование обновления access токена (маскированный)
+                    masked_access = self._mask_token(encrypted_access)
+                    centralized_logger.warning(f"💾 [TOKEN_UPDATE] ЗАПИСЫВАЕМ В БД для пользователя {vk_user_id}: encrypted_access_token={masked_access}", user_id=vk_user_id)
                 
                 # Обновляем refresh токен если предоставлен (используем встроенное шифрование)
                 if refresh_token:
+                    masked_refresh_before = self._mask_token(refresh_token)
+                    centralized_logger.info(f"💾 [TOKEN_UPDATE] ПОЛУЧИЛИ REFRESH TOKEN для пользователя {vk_user_id}: refresh_token={masked_refresh_before} (тип: REFRESH_TOKEN)", user_id=vk_user_id)
                     encrypted_refresh = self.encrypt_refresh_token(refresh_token)
                     refresh_hash, salt = self.hash_refresh_token(refresh_token)
                     user_settings.encrypted_refresh_token = encrypted_refresh
                     user_settings.refresh_token_hash = refresh_hash
                     user_settings.token_salt = salt
+                    # ⚠️ WARNING: Логирование обновления refresh токена (маскированный)
+                    masked_refresh = self._mask_token(encrypted_refresh)
+                    centralized_logger.warning(f"💾 [TOKEN_UPDATE] ЗАПИСЫВАЕМ В БД для пользователя {vk_user_id}: encrypted_refresh_token={masked_refresh}", user_id=vk_user_id)
                 
                 # Обновляем время истечения если предоставлено
                 if expires_in:
@@ -1570,27 +1694,13 @@ def main():
     else:
         print("❌ Ошибка добавления пользователя")
     
-    # Тестируем добавление лога
+    # Тестирование добавления лога пропущено - логирование в БД отключено
     print("\n4. Тестирование добавления лога...")
-    if db_interface.add_bot_log(
-        vk_user_id=test_user_id,
-        log_level="info",
-        log_message="Тестовое сообщение от интерфейса БД"
-    ):
-        print("✅ Лог добавлен")
-    else:
-        print("❌ Ошибка добавления лога")
+    print("⚠️ Логирование в БД отключено, все логи идут только в файлы")
     
-    # Тестируем добавление сообщения
+    # Таблица bot_messages удалена
     print("\n5. Тестирование добавления сообщения...")
-    if db_interface.add_bot_message(
-        vk_user_id=test_user_id,
-        message_type="command",
-        message_text="/start"
-    ):
-        print("✅ Сообщение добавлено")
-    else:
-        print("❌ Ошибка добавления сообщения")
+    print("⚠️ Таблица bot_messages удалена, все логи идут только в файлы")
     
     # Получаем обновленную информацию
     print("\n6. Обновленная информация о таблицах...")
