@@ -7,6 +7,7 @@ API для интеграции с базой данных VKinder Bot
 import sys
 import os
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 from src.utils.centralized_logger import centralized_logger
 
 # Защита от прямого запуска
@@ -21,12 +22,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from .database_interface import DatabaseInterface
     from .postgres_manager import PostgreSQLManager
-    from .models import VKUser, Photo, Favorite, Blacklisted, SearchHistory, UserSettings, BotLog, BotMessage
+    from .models import VKUser, Photo, Favorite, Blacklisted, UserSettings
 except ImportError:
     # Если относительные импорты не работают, используем абсолютные
     from database_interface import DatabaseInterface
     from postgres_manager import PostgreSQLManager
-    from models import VKUser, Photo, Favorite, Blacklisted, SearchHistory, UserSettings, BotLog, BotMessage
+    from models import VKUser, Photo, Favorite, Blacklisted, UserSettings
 
 from loguru import logger
 
@@ -34,17 +35,43 @@ from loguru import logger
 _db_interface = None
 
 
-def get_db_interface() -> DatabaseInterface:
+def get_db_interface() -> Optional[DatabaseInterface]:
     """
     Получение глобального экземпляра интерфейса базы данных
     
     Returns:
-        DatabaseInterface: Экземпляр интерфейса БД
+        Optional[DatabaseInterface]: Экземпляр интерфейса БД или None если недоступна
     """
     global _db_interface
     if _db_interface is None:
-        _db_interface = DatabaseInterface()
-    return _db_interface
+        try:
+            _db_interface = DatabaseInterface()
+            # Если БД недоступна, всё равно возвращаем объект, но он будет помечен как недоступный
+            if not _db_interface.is_available:
+                centralized_logger.warning("⚠️ База данных недоступна, операции с БД будут пропущены", user_id=0)
+            return _db_interface
+        except Exception as e:
+            centralized_logger.warning(f"⚠️ Не удалось создать интерфейс БД: {e}, операции с БД будут пропущены", user_id=0)
+            # Создаем заглушку вместо None, чтобы избежать ошибок в коде
+            class DummyDB:
+                is_available = False
+                def get_session(self):
+                    from contextlib import contextmanager
+                    @contextmanager
+                    def dummy_session():
+                        yield type('obj', (object,), {})()
+                    return dummy_session()
+            _db_interface = DummyDB()
+            return None
+    
+    # Проверяем, что это правильный объект
+    if isinstance(_db_interface, DatabaseInterface):
+        return _db_interface
+    elif hasattr(_db_interface, 'is_available'):
+        # Это заглушка, возвращаем None чтобы указать что БД недоступна
+        return None
+    else:
+        return None
 
 
 # === УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ===
@@ -145,11 +172,11 @@ def add_user(vk_user_id: int, first_name: str, last_name: str,
         time=time
     )
     
-    # Логируем вызов API функции
+    # Логируем вызов API функции (только в файлы)
     if result:
-        log_info(f"API: Пользователь {vk_user_id} ({first_name} {last_name}) добавлен через API")
+        centralized_logger.info(f"API: Пользователь {vk_user_id} ({first_name} {last_name}) добавлен через API", user_id=0)
     else:
-        log_error(f"API: Ошибка добавления пользователя {vk_user_id} через API")
+        centralized_logger.error(f"API: Ошибка добавления пользователя {vk_user_id} через API", user_id=0)
     
     return result
 
@@ -215,7 +242,7 @@ def update_user_fields(vk_user_id: int, access: Optional[str] = None,
             from models import VKUser
             user = session.query(VKUser).filter(VKUser.vk_user_id == vk_user_id).first()
             if not user:
-                log_error(f"API: Пользователь {vk_user_id} не найден для обновления полей")
+                centralized_logger.error(f"API: Пользователь {vk_user_id} не найден для обновления полей")
                 return False
             
             # Обновляем только переданные поля
@@ -229,7 +256,7 @@ def update_user_fields(vk_user_id: int, access: Optional[str] = None,
                 user.city_id = city_id
             
             session.commit()
-            log_info(f"API: Поля пользователя {vk_user_id} обновлены")
+            centralized_logger.info(f"API: Поля пользователя {vk_user_id} обновлены")
             return True
             
     except Exception as e:
@@ -281,9 +308,9 @@ def update_user(vk_user_id: int, **kwargs) -> bool:
     
     # Логируем вызов API функции
     if result:
-        log_info(f"API: Пользователь {vk_user_id} обновлен через API")
+        centralized_logger.info(f"API: Пользователь {vk_user_id} обновлен через API")
     else:
-        log_error(f"API: Ошибка обновления пользователя {vk_user_id} через API")
+        centralized_logger.error(f"API: Ошибка обновления пользователя {vk_user_id} через API")
     
     return result
 
@@ -302,142 +329,11 @@ def delete_user(vk_user_id: int) -> bool:
     
     # Логируем вызов API функции
     if result:
-        log_info(f"API: Пользователь {vk_user_id} удален через API")
+        centralized_logger.info(f"API: Пользователь {vk_user_id} удален через API")
     else:
-        log_error(f"API: Ошибка удаления пользователя {vk_user_id} через API")
+        centralized_logger.error(f"API: Ошибка удаления пользователя {vk_user_id} через API")
     
     return result
-
-
-# === ЛОГИРОВАНИЕ ===
-
-def log_info(message: str, user_id: int = 0) -> bool:
-    """
-    Запись информационного лога
-    
-    Args:
-        message (str): Текст сообщения
-        user_id (int): ID пользователя (0 для системных логов)
-        
-    Returns:
-        bool: True если запись успешна, False иначе
-    """
-    return get_db_interface().add_bot_log(
-        vk_user_id=user_id,
-        log_level="info",
-        log_message=message
-    )
-
-
-def log_debug(message: str, user_id: int = 0) -> bool:
-    """
-    Запись отладочного лога
-    
-    Args:
-        message (str): Текст сообщения
-        user_id (int): ID пользователя (0 для системных логов)
-        
-    Returns:
-        bool: True если запись успешна, False иначе
-    """
-    return get_db_interface().add_bot_log(
-        vk_user_id=user_id,
-        log_level="debug",
-        log_message=message
-    )
-
-
-def log_error(message: str, user_id: int = 0) -> bool:
-    """
-    Запись лога ошибки
-    
-    Args:
-        message (str): Текст сообщения
-        user_id (int): ID пользователя (0 для системных логов)
-        
-    Returns:
-        bool: True если запись успешна, False иначе
-    """
-    return get_db_interface().add_bot_log(
-        vk_user_id=user_id,
-        log_level="error",
-        log_message=message
-    )
-
-
-def log_warning(message: str, user_id: int = 0) -> bool:
-    """
-    Запись лога предупреждения
-    
-    Args:
-        message (str): Текст сообщения
-        user_id (int): ID пользователя (0 для системных логов)
-        
-    Returns:
-        bool: True если запись успешна, False иначе
-    """
-    return get_db_interface().add_bot_log(
-        vk_user_id=user_id,
-        log_level="warning",
-        log_message=message
-    )
-
-
-def get_logs(user_id: int = 0, level: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-    """
-    Получение логов
-    
-    Args:
-        user_id (int): ID пользователя (0 для всех)
-        level (Optional[str]): Уровень логирования
-        limit (int): Максимальное количество записей
-        
-    Returns:
-        List[Dict[str, Any]]: Список логов
-    """
-    return get_db_interface().get_bot_logs(
-        vk_user_id=user_id,
-        log_level=level,
-        limit=limit
-    )
-
-
-# === СООБЩЕНИЯ ===
-
-def add_message(user_id: int, message_type: str, message_text: str) -> bool:
-    """
-    Добавление сообщения бота
-    
-    Args:
-        user_id (int): ID пользователя VK
-        message_type (str): Тип сообщения (command, response, error)
-        message_text (str): Текст сообщения
-        
-    Returns:
-        bool: True если добавление успешно, False иначе
-    """
-    return get_db_interface().add_bot_message(
-        vk_user_id=user_id,
-        message_type=message_type,
-        message_text=message_text
-    )
-
-
-def get_user_messages(user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Получение сообщений пользователя
-    
-    Args:
-        user_id (int): ID пользователя VK
-        limit (int): Максимальное количество сообщений
-        
-    Returns:
-        List[Dict[str, Any]]: Список сообщений
-    """
-    return get_db_interface().get_user_messages(
-        vk_user_id=user_id,
-        limit=limit
-    )
 
 
 # === ИЗБРАННОЕ ===
@@ -460,9 +356,9 @@ def add_favorite(user_id: int, favorite_id: int) -> bool:
     
     # Логируем вызов API функции
     if result:
-        log_info(f"API: Пользователь {favorite_id} добавлен в избранное к {user_id} через API")
+        centralized_logger.info(f"API: Пользователь {favorite_id} добавлен в избранное к {user_id} через API")
     else:
-        log_error(f"API: Ошибка добавления в избранное {favorite_id} к {user_id} через API")
+        centralized_logger.error(f"API: Ошибка добавления в избранное {favorite_id} к {user_id} через API")
     
     return result
 
@@ -498,9 +394,9 @@ def remove_favorite(user_id: int, favorite_id: int) -> bool:
     
     # Логируем вызов API функции
     if result:
-        log_info(f"API: Пользователь {favorite_id} удален из избранного у {user_id} через API")
+        centralized_logger.info(f"API: Пользователь {favorite_id} удален из избранного у {user_id} через API")
     else:
-        log_error(f"API: Ошибка удаления из избранного {favorite_id} у {user_id} через API")
+        centralized_logger.error(f"API: Ошибка удаления из избранного {favorite_id} у {user_id} через API")
     
     return result
 
@@ -536,12 +432,10 @@ def add_test_data() -> bool:
         )
         
         # Добавляем тестовые логи
-        log_info("Тестовый лог от API", 999999)
-        log_debug("Отладочный лог от API", 999999)
+        centralized_logger.info("Тестовый лог от API", 999999)
+        centralized_logger.debug("Отладочный лог от API", 999999)
         
-        # Добавляем тестовое сообщение
-        add_message(999999, "command", "/test")
-        add_message(999999, "response", "Тестовый ответ от API")
+        # Таблица bot_messages удалена, логирование только в файлы
         
         return True
         
@@ -580,16 +474,14 @@ def example_usage():
     
     # Логирование
     print("\n4. Логирование...")
-    log_info("Пользователь зашел в бота", 123456)
-    log_debug("Отладочная информация", 123456)
+    centralized_logger.info("Пользователь зашел в бота", 123456)
+    centralized_logger.debug("Отладочная информация", 123456)
     centralized_logger.error("Тестовая ошибка", 123456)
     print("✅ Логи записаны")
     
-    # Сообщения
+    # Таблица bot_messages удалена, логирование только в файлы
     print("\n5. Сообщения...")
-    add_message(123456, "command", "/start")
-    add_message(123456, "response", "Привет! Добро пожаловать!")
-    print("✅ Сообщения добавлены")
+    print("⚠️ Таблица bot_messages удалена, все логи идут только в файлы")
     
     # Избранное
     print("\n6. Избранное...")
@@ -604,11 +496,8 @@ def example_usage():
     if user:
         print(f"✅ Пользователь найден: {user['first_name']} {user['last_name']}")
     
-    messages = get_user_messages(123456, limit=5)
-    print(f"✅ Найдено сообщений: {len(messages)}")
-    
-    logs = get_logs(user_id=123456, limit=5)
-    print(f"✅ Найдено логов: {len(logs)}")
+    # Логирование в БД отключено, логи только в файлах
+    print("✅ Логи только в файлах")
     
     favorites = get_favorites(123456)
     print(f"✅ Найдено избранных: {len(favorites)}")
@@ -630,13 +519,13 @@ def start_postgresql() -> bool:
         result = manager.start_postgresql()
         
         if result:
-            log_info("PostgreSQL запущен через API")
+            centralized_logger.info("PostgreSQL запущен через API")
         else:
-            log_error("Ошибка запуска PostgreSQL через API")
+            centralized_logger.error("Ошибка запуска PostgreSQL через API")
         
         return result
     except Exception as e:
-        log_error(f"Ошибка запуска PostgreSQL: {e}")
+        centralized_logger.error(f"Ошибка запуска PostgreSQL: {e}")
         return False
 
 
@@ -652,13 +541,13 @@ def stop_postgresql() -> bool:
         result = manager.stop_postgresql()
         
         if result:
-            log_info("PostgreSQL остановлен через API")
+            centralized_logger.info("PostgreSQL остановлен через API")
         else:
-            log_error("Ошибка остановки PostgreSQL через API")
+            centralized_logger.error("Ошибка остановки PostgreSQL через API")
         
         return result
     except Exception as e:
-        log_error(f"Ошибка остановки PostgreSQL: {e}")
+        centralized_logger.error(f"Ошибка остановки PostgreSQL: {e}")
         return False
 
 
@@ -674,13 +563,13 @@ def restart_postgresql() -> bool:
         result = manager.restart_postgresql()
         
         if result:
-            log_info("PostgreSQL перезапущен через API")
+            centralized_logger.info("PostgreSQL перезапущен через API")
         else:
-            log_error("Ошибка перезапуска PostgreSQL через API")
+            centralized_logger.error("Ошибка перезапуска PostgreSQL через API")
         
         return result
     except Exception as e:
-        log_error(f"Ошибка перезапуска PostgreSQL: {e}")
+        centralized_logger.error(f"Ошибка перезапуска PostgreSQL: {e}")
         return False
 
 
@@ -696,13 +585,13 @@ def check_postgresql_status() -> bool:
         result = manager.check_postgresql_status()
         
         if result:
-            log_info("PostgreSQL статус: запущен")
+            centralized_logger.info("PostgreSQL статус: запущен")
         else:
-            log_warning("PostgreSQL статус: не запущен")
+            centralized_logger.warning("PostgreSQL статус: не запущен")
         
         return result
     except Exception as e:
-        log_error(f"Ошибка проверки статуса PostgreSQL: {e}")
+        centralized_logger.error(f"Ошибка проверки статуса PostgreSQL: {e}")
         return False
 
 
@@ -718,13 +607,13 @@ def get_postgresql_info() -> Dict[str, Any]:
         info = manager.get_postgresql_info()
         
         if 'error' not in info:
-            log_info("Информация о PostgreSQL получена через API")
+            centralized_logger.info("Информация о PostgreSQL получена через API")
         else:
-            log_error(f"Ошибка получения информации о PostgreSQL: {info['error']}")
+            centralized_logger.error(f"Ошибка получения информации о PostgreSQL: {info['error']}")
         
         return info
     except Exception as e:
-        log_error(f"Ошибка получения информации о PostgreSQL: {e}")
+        centralized_logger.error(f"Ошибка получения информации о PostgreSQL: {e}")
         return {'error': str(e)}
 
 
@@ -740,13 +629,14 @@ def create_database_if_not_exists() -> bool:
         result = manager.create_database_if_not_exists()
         
         if result:
-            log_info("База данных создана или уже существует через API")
+            # DEBUG: база уже существует или создана - это нормально для API вызовов
+            centralized_logger.debug("База данных проверена через API (создана или уже существует)")
         else:
-            log_error("Ошибка создания базы данных через API")
+            centralized_logger.error("Ошибка создания базы данных через API")
         
         return result
     except Exception as e:
-        log_error(f"Ошибка создания базы данных: {e}")
+        centralized_logger.error(f"Ошибка создания базы данных: {e}")
         return False
 
 
@@ -758,25 +648,25 @@ def ensure_postgresql_ready() -> bool:
         bool: True если PostgreSQL готов, False иначе
     """
     try:
-        log_info("Проверка готовности PostgreSQL через API")
+        centralized_logger.info("Проверка готовности PostgreSQL через API")
         
         manager = PostgreSQLManager()
         
         # Проверяем и запускаем PostgreSQL
         if not manager.ensure_postgresql_running():
-            log_error("Не удалось запустить PostgreSQL через API")
+            centralized_logger.error("Не удалось запустить PostgreSQL через API")
             return False
         
         # Создаем БД если нужно
         if not manager.create_database_if_not_exists():
-            log_error("Не удалось создать базу данных через API")
+            centralized_logger.error("Не удалось создать базу данных через API")
             return False
         
-        log_info("PostgreSQL готов к работе через API")
+        centralized_logger.info("PostgreSQL готов к работе через API")
         return True
         
     except Exception as e:
-        log_error(f"Ошибка подготовки PostgreSQL: {e}")
+        centralized_logger.error(f"Ошибка подготовки PostgreSQL: {e}")
         return False
 
 
@@ -788,7 +678,9 @@ def get_table_list() -> List[str]:
     """Получить список всех таблиц в базе данных"""
     try:
         from sqlalchemy import inspect
-        db = DatabaseInterface()
+        db = get_db_interface()
+        if not db or not db.is_available:
+            return []
         inspector = inspect(db.engine)
         tables = inspector.get_table_names()
         return tables
@@ -800,14 +692,16 @@ def get_table_count(table_name: str) -> int:
     """Получить количество записей в таблице"""
     try:
         from sqlalchemy import text
-        db = DatabaseInterface()
+        db = get_db_interface()
+        if not db or not db.is_available:
+            return -1
         with db.get_session() as session:
             # Используем raw SQL для подсчета записей
             result = session.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
             count = result.scalar()
             return count if count is not None else 0
     except Exception as e:
-        centralized_logger.error(f"Ошибка получения количества записей в таблице {table_name}: {e}")
+        centralized_logger.error(f"Ошибка получения количества записей в таблице {table_name}: {e}", user_id=0)
         return -1  # Возвращаем -1 для обозначения ошибки
 
 def get_table_info(table_name: str) -> Dict[str, Any]:
@@ -816,7 +710,9 @@ def get_table_info(table_name: str) -> Dict[str, Any]:
         from sqlalchemy import inspect, text
         from datetime import datetime
         
-        db = DatabaseInterface()
+        db = get_db_interface()
+        if not db or not db.is_available:
+            return {}
         inspector = inspect(db.engine)
         
         # Проверяем, существует ли таблица
@@ -1185,23 +1081,10 @@ def get_user_profile_stats(user_id: int) -> dict:
         
         # Добавляем дополнительную информацию о профиле
         with db.get_session() as session:
-            # Количество поисковых запросов
-            searches_count = session.query(SearchHistory).filter(
-                SearchHistory.user_vk_id == user_id
-            ).count()
-            stats['total_searches'] = searches_count
-            
-            # Последний поиск
-            last_search = session.query(SearchHistory).filter(
-                SearchHistory.user_vk_id == user_id
-            ).order_by(SearchHistory.created_at.desc()).first()
-            
-            if last_search:
-                stats['last_search_date'] = last_search.created_at.isoformat()
-                stats['last_search_results'] = last_search.results_count
-            else:
-                stats['last_search_date'] = None
-                stats['last_search_results'] = 0
+            # Количество поисковых запросов (таблица search_history удалена)
+            stats['total_searches'] = 0
+            stats['last_search_date'] = None
+            stats['last_search_results'] = 0
             
             # Настройки пользователя
             user_settings = session.query(UserSettings).filter(
@@ -1214,7 +1097,9 @@ def get_user_profile_stats(user_id: int) -> dict:
                     'max_age': user_settings.max_age,
                     'sex_preference': user_settings.sex_preference,
                     'city_preference': user_settings.city_preference,
-                    'online_only': user_settings.online
+                    'online_only': user_settings.online,
+                    'zodiac_signs': user_settings.zodiac_signs if user_settings.zodiac_signs else [],
+                    'relationship_statuses': user_settings.relationship_statuses if user_settings.relationship_statuses else []
                 }
             else:
                 stats['user_settings'] = None
@@ -1246,49 +1131,179 @@ def get_user_activity_summary(user_id: int) -> dict:
             # Общая статистика активности
             activity = {}
             
-            # Количество сообщений с ботом
-            messages_count = session.query(BotMessage).filter(
-                BotMessage.vk_user_id == user_id
-            ).count()
-            activity['messages_with_bot'] = messages_count
-            
-            # Количество логов пользователя
-            logs_count = session.query(BotLog).filter(
-                BotLog.vk_user_id == user_id
-            ).count()
-            activity['bot_logs_count'] = logs_count
-            
-            # Последняя активность
-            last_message = session.query(BotMessage).filter(
-                BotMessage.vk_user_id == user_id
-            ).order_by(BotMessage.sent_at.desc()).first()
-            
-            if last_message:
-                activity['last_activity'] = last_message.sent_at.isoformat()
-            else:
-                activity['last_activity'] = None
+            # Логирование в БД отключено, логи только в файлах
+            activity['bot_logs_count'] = 0
+            activity['messages_with_bot'] = 0  # Таблица bot_messages удалена
+            activity['last_activity'] = None  # Таблица bot_messages удалена
             
             # Статистика по дням (последние 7 дней)
             from datetime import datetime, timedelta
             week_ago = datetime.now() - timedelta(days=7)
             
-            recent_searches = session.query(SearchHistory).filter(
-                SearchHistory.user_vk_id == user_id,
-                SearchHistory.created_at >= week_ago
-            ).count()
-            activity['searches_last_week'] = recent_searches
-            
-            recent_messages = session.query(BotMessage).filter(
-                BotMessage.vk_user_id == user_id,
-                BotMessage.sent_at >= week_ago
-            ).count()
-            activity['messages_last_week'] = recent_messages
+            # Поиски за неделю (таблица search_history удалена)
+            activity['searches_last_week'] = 0
+            activity['messages_last_week'] = 0  # Таблица bot_messages удалена
         
         centralized_logger.info(f"✅ Получена сводка активности пользователя {user_id}")
         return activity
     except Exception as e:
         centralized_logger.error(f"❌ Ошибка получения сводки активности: {e}")
         return {}
+
+
+# === СОХРАНЕНИЕ ПАРАМЕТРОВ ПОИСКА ===
+
+def save_search_params(vk_user_id: int, min_age: Optional[int] = None, max_age: Optional[int] = None,
+                       sex_preference: Optional[int] = None, zodiac_signs: Optional[List[str]] = None,
+                       relationship_statuses: Optional[List[str]] = None, online: Optional[bool] = None) -> bool:
+    """
+    Сохранение параметров поиска пользователя в базу данных
+    
+    Args:
+        vk_user_id: ID пользователя VK
+        min_age: Минимальный возраст (если None - не обновляется)
+        max_age: Максимальный возраст (если None - не обновляется)
+        sex_preference: Предпочтение по полу (1 - женский, 2 - мужской, 0 - любой, None - не обновляется)
+        zodiac_signs: Список знаков зодиака (None - не обновляется)
+        relationship_statuses: Список статусов отношений (None - не обновляется)
+        online: Только онлайн пользователи (None - не обновляется)
+        
+    Returns:
+        bool: True если сохранение успешно, False иначе
+    """
+    try:
+        db = get_db_interface()
+        if not db or not db.is_available:
+            centralized_logger.warning(f"⚠️ База данных недоступна, параметры поиска не сохранены для пользователя {vk_user_id}", user_id=vk_user_id)
+            return False
+        
+        with db.get_session() as session:
+            # Получаем или создаем настройки пользователя
+            from .models import UserSettings, VKUser
+            
+            user_settings = session.query(UserSettings).filter(
+                UserSettings.vk_user_id == vk_user_id
+            ).first()
+            
+            if not user_settings:
+                # Проверяем, существует ли пользователь
+                vk_user = session.query(VKUser).filter(
+                    VKUser.vk_user_id == vk_user_id
+                ).first()
+                
+                if not vk_user:
+                    centralized_logger.warning(f"⚠️ Пользователь {vk_user_id} не найден в базе, создаем запись пользователя", user_id=vk_user_id)
+                    # Создаем пользователя с базовыми данными
+                    vk_user = VKUser(
+                        vk_user_id=vk_user_id,
+                        first_name="Пользователь",
+                        last_name="ВКонтакте",
+                        age=None,
+                        sex=None,
+                        city=None
+                    )
+                    session.add(vk_user)
+                    session.flush()
+                
+                # Создаем настройки пользователя
+                user_settings = UserSettings(
+                    vk_user_id=vk_user_id,
+                    min_age=min_age if min_age is not None else 18,
+                    max_age=max_age if max_age is not None else 35
+                )
+                session.add(user_settings)
+                centralized_logger.info(f"✅ Созданы настройки пользователя {vk_user_id}", user_id=vk_user_id)
+            
+            # Обновляем только переданные параметры
+            if min_age is not None:
+                user_settings.min_age = min_age
+            if max_age is not None:
+                user_settings.max_age = max_age
+            if sex_preference is not None:
+                user_settings.sex_preference = sex_preference
+            if zodiac_signs is not None:
+                user_settings.zodiac_signs = zodiac_signs
+            if relationship_statuses is not None:
+                user_settings.relationship_statuses = relationship_statuses
+            if online is not None:
+                user_settings.online = online
+            
+            session.commit()
+            
+            params_str = []
+            if min_age is not None or max_age is not None:
+                params_str.append(f"возраст={user_settings.min_age}-{user_settings.max_age}")
+            if sex_preference is not None:
+                params_str.append(f"пол={user_settings.sex_preference}")
+            if zodiac_signs is not None:
+                params_str.append(f"зодиак={len(zodiac_signs)} знаков")
+            if relationship_statuses is not None:
+                params_str.append(f"статусы={len(relationship_statuses)}")
+            if online is not None:
+                params_str.append(f"онлайн={online}")
+            
+            centralized_logger.info(f"✅ Сохранены параметры поиска для пользователя {vk_user_id}: {', '.join(params_str)}", user_id=vk_user_id)
+            return True
+            
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка сохранения параметров поиска для пользователя {vk_user_id}: {e}", user_id=vk_user_id)
+        import traceback
+        centralized_logger.error(f"📊 TRACEBACK: {traceback.format_exc()}", user_id=0)
+        return False
+
+
+def get_search_params(vk_user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Получение параметров поиска пользователя из базы данных
+    
+    Args:
+        vk_user_id: ID пользователя VK
+        
+    Returns:
+        Optional[Dict]: Словарь с параметрами поиска или None если не найдены
+        {
+            'min_age': int,
+            'max_age': int,
+            'sex_preference': int,
+            'zodiac_signs': List[str],
+            'relationship_statuses': List[str],
+            'online': bool
+        }
+    """
+    try:
+        db = get_db_interface()
+        if not db or not db.is_available:
+            centralized_logger.warning(f"⚠️ База данных недоступна, параметры поиска не получены для пользователя {vk_user_id}", user_id=vk_user_id)
+            return None
+        
+        with db.get_session() as session:
+            from .models import UserSettings
+            
+            user_settings = session.query(UserSettings).filter(
+                UserSettings.vk_user_id == vk_user_id
+            ).first()
+            
+            if not user_settings:
+                centralized_logger.debug(f"ℹ️ Параметры поиска для пользователя {vk_user_id} не найдены в базе", user_id=vk_user_id)
+                return None
+            
+            params = {
+                'min_age': user_settings.min_age,
+                'max_age': user_settings.max_age,
+                'sex_preference': user_settings.sex_preference,
+                'zodiac_signs': user_settings.zodiac_signs if user_settings.zodiac_signs else [],
+                'relationship_statuses': user_settings.relationship_statuses if user_settings.relationship_statuses else [],
+                'online': user_settings.online if user_settings.online is not None else False
+            }
+            
+            centralized_logger.debug(f"✅ Получены параметры поиска для пользователя {vk_user_id}: возраст={params['min_age']}-{params['max_age']}, пол={params['sex_preference']}, зодиак={len(params['zodiac_signs'])} знаков, статусы={len(params['relationship_statuses'])}", user_id=vk_user_id)
+            return params
+            
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка получения параметров поиска для пользователя {vk_user_id}: {e}", user_id=vk_user_id)
+        import traceback
+        centralized_logger.error(f"📊 TRACEBACK: {traceback.format_exc()}", user_id=0)
+        return None
 
 
 # === ФУНКЦИИ ДЛЯ РАБОТЫ С ЗАШИФРОВАННЫМИ ТОКЕНАМИ ===
@@ -1465,4 +1480,302 @@ def update_user_tokens(vk_user_id: int, access_token: Optional[str] = None,
         return db.update_user_tokens(vk_user_id, access_token, refresh_token, expires_in)
     except Exception as e:
         centralized_logger.error(f"❌ Ошибка обновления токенов пользователя {vk_user_id}: {e}")
+        return False
+
+
+# === УПРАВЛЕНИЕ ТОКЕНОМ ГРУППЫ ===
+
+# ID специального пользователя для хранения токена группы
+GROUP_ADMIN_USER_ID = 900000009
+
+
+def get_group_token() -> Optional[str]:
+    """
+    Получение расшифрованного токена группы из базы данных
+    
+    Returns:
+        Optional[str]: Токен группы или None если не найден/недоступен
+    """
+    try:
+        db = DatabaseInterface()
+        return db.get_user_access_token(GROUP_ADMIN_USER_ID)
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка получения токена группы: {e}", user_id=0)
+        return None
+
+
+def update_group_token(group_token: str) -> bool:
+    """
+    Обновление токена группы в базе данных (зашифрованным)
+    
+    Args:
+        group_token: Новый токен группы
+        
+    Returns:
+        bool: True если обновление успешно, False иначе
+    """
+    try:
+        db = DatabaseInterface()
+        # Используем expires_in=None для токена группы (не истекает)
+        return db.update_user_tokens(GROUP_ADMIN_USER_ID, access_token=group_token, refresh_token=None, expires_in=None)
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка обновления токена группы: {e}", user_id=0)
+        return False
+
+
+def migrate_group_token_from_env() -> bool:
+    """
+    Миграция токена группы из переменной окружения .env в базу данных
+    
+    Создает пользователя с ID 900000009 если его нет, и сохраняет токен зашифрованным
+    
+    Returns:
+        bool: True если миграция успешна, False иначе
+    """
+    try:
+        import os
+        from dotenv import load_dotenv
+        
+        # Загружаем переменные окружения
+        load_dotenv()
+        
+        # Получаем токен из .env
+        env_token = os.getenv('VK_GROUP_TOKEN')
+        if not env_token or env_token == 'your_group_token_here':
+            centralized_logger.warning("⚠️ Токен группы не найден в .env или содержит значение по умолчанию", user_id=0)
+            return False
+        
+        # Получаем ID группы
+        group_id_str = os.getenv('VK_GROUP_ID', '0')
+        try:
+            group_id = int(group_id_str)
+        except ValueError:
+            centralized_logger.error(f"❌ Неверный формат VK_GROUP_ID: {group_id_str}", user_id=0)
+            return False
+        
+        # Проверяем, есть ли уже токен в базе
+        existing_token = get_group_token()
+        if existing_token:
+            centralized_logger.info("ℹ️ Токен группы уже существует в базе данных, пропускаем миграцию", user_id=0)
+            return True
+        
+        # Создаем или обновляем пользователя-администратора
+        db = DatabaseInterface()
+        if not db.is_available:
+            centralized_logger.error("❌ База данных недоступна для миграции токена", user_id=0)
+            return False
+        
+        # Создаем пользователя-администратора если его нет
+        try:
+            with db.get_session() as session:
+                from sqlalchemy import text
+                # Проверяем существование пользователя
+                user_exists = session.execute(
+                    text("SELECT COUNT(*) FROM vk_users WHERE vk_user_id = :user_id"),
+                    {"user_id": GROUP_ADMIN_USER_ID}
+                ).scalar() > 0
+                
+                if not user_exists:
+                    # Создаем пользователя-администратора
+                    session.execute(
+                        text("""
+                            INSERT INTO vk_users (vk_user_id, first_name, last_name, created_at, updated_at)
+                            VALUES (:user_id, 'Group', 'Admin', NOW(), NOW())
+                            ON CONFLICT (vk_user_id) DO NOTHING
+                        """),
+                        {"user_id": GROUP_ADMIN_USER_ID}
+                    )
+                    session.commit()
+                    centralized_logger.info(f"✅ Создан пользователь-администратор с ID {GROUP_ADMIN_USER_ID}", user_id=0)
+        except Exception as e:
+            centralized_logger.error(f"❌ Ошибка создания пользователя-администратора: {e}", user_id=0)
+            return False
+        
+        # Сохраняем токен в базу
+        if update_group_token(env_token):
+            centralized_logger.info("✅ Токен группы успешно мигрирован из .env в базу данных", user_id=0)
+            return True
+        else:
+            centralized_logger.error("❌ Ошибка сохранения токена группы в базу данных", user_id=0)
+            return False
+            
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка миграции токена группы: {e}", user_id=0)
+        return False
+
+
+def read_group_token_console() -> Optional[str]:
+    """
+    Чтение токена группы из базы данных и вывод в консоль (для администратора)
+    
+    Returns:
+        Optional[str]: Токен группы или None если не найден
+    """
+    try:
+        token = get_group_token()
+        if token:
+            # Адаптивная маскировка в зависимости от длины токена
+            length = len(token) if token else 0
+            if length >= 16:
+                masked_token = token[:8] + "***" + token[-5:]
+            elif length >= 13:
+                masked_token = token[:6] + "***" + token[-4:]
+            elif length >= 11:
+                masked_token = token[:4] + "***" + token[-4:]
+            elif length >= 9:
+                masked_token = token[:3] + "***" + token[-3:]
+            elif length >= 8:
+                masked_token = token[:2] + "***" + token[-3:]
+            elif length >= 5:
+                masked_token = token[:1] + "***" + token[-1:]
+            elif length >= 4:
+                masked_token = token[:1] + "***"
+            else:
+                masked_token = "***"
+            print(f"🔐 Токен группы найден в базе данных: {masked_token}")
+            return token
+        else:
+            print("❌ Токен группы не найден в базе данных")
+            return None
+    except Exception as e:
+        print(f"❌ Ошибка чтения токена группы: {e}")
+        return None
+
+
+def count_records(
+    model_name: str,
+    filters: Optional[Dict[str, Any]] = None,
+    date_from: Optional[datetime] = None,
+    date_field_primary: Optional[str] = None,
+    date_field_fallback: Optional[str] = None,
+    distinct_field: Optional[str] = None,
+    user_id: Optional[int] = None,
+    user_field: Optional[str] = None
+) -> int:
+    """
+    Универсальная функция для подсчета записей в базе данных с поддержкой фильтров
+    
+    Args:
+        model_name: Название модели ('Photo', 'Favorite', 'Blacklisted', 'VKUser', 'UserSettings')
+        filters: Словарь с дополнительными фильтрами {поле: значение}
+        date_from: Дата начала периода для фильтрации по дате
+        date_field_primary: Основное поле даты (например, 'updated_at', 'token_updated_at')
+        date_field_fallback: Резервное поле даты (например, 'created_at')
+        distinct_field: Поле для подсчета уникальных значений (например, 'vk_user_id')
+        user_id: ID пользователя для фильтрации по полю user_field
+        user_field: Название поля для фильтрации по user_id (например, 'user_vk_id', 'found_by_user_id')
+    
+    Returns:
+        int: Количество записей, соответствующих фильтрам
+    
+    Примеры использования:
+        from datetime import datetime, time
+        
+        # Подсчет всех фото
+        count = count_records('Photo')
+        
+        # Подсчет фото пользователя за сегодня
+        today = datetime.combine(datetime.now().date(), time.min)
+        count = count_records(
+            'Photo',
+            date_from=today,
+            date_field_primary='updated_at',
+            date_field_fallback='created_at',
+            user_id=12345,
+            user_field='found_by_user_id'
+        )
+        
+        # Подсчет уникальных пользователей по фото
+        count = count_records(
+            'Photo',
+            distinct_field='vk_user_id',
+            user_id=12345,
+            user_field='found_by_user_id'
+        )
+    """
+    try:
+        from src.database.models import Photo, Favorite, Blacklisted, VKUser, UserSettings
+        
+        # Маппинг названий моделей на классы
+        model_map = {
+            'Photo': Photo,
+            'Favorite': Favorite,
+            'Blacklisted': Blacklisted,
+            'VKUser': VKUser,
+            'UserSettings': UserSettings
+        }
+        
+        if model_name not in model_map:
+            centralized_logger.error(f"❌ Неизвестная модель: {model_name}", user_id=0)
+            return 0
+        
+        model_class = model_map[model_name]
+        db = get_db_interface()
+        
+        if not db or not db.is_available:
+            centralized_logger.error("❌ База данных недоступна", user_id=0)
+            return 0
+        
+        return db.count_records(
+            model_class=model_class,
+            filters=filters,
+            date_from=date_from,
+            date_field_primary=date_field_primary,
+            date_field_fallback=date_field_fallback,
+            distinct_field=distinct_field,
+            user_id=user_id,
+            user_field=user_field
+        )
+        
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка подсчета записей {model_name}: {e}", user_id=0)
+        return 0
+
+
+def check_group_token_validity(group_token: Optional[str] = None) -> bool:
+    """
+    Проверка валидности токена группы через VK API
+    
+    Args:
+        group_token: Токен для проверки (если None, берется из базы)
+        
+    Returns:
+        bool: True если токен валиден, False иначе
+    """
+    try:
+        # Получаем токен если не указан
+        if group_token is None:
+            group_token = get_group_token()
+        
+        if not group_token:
+            centralized_logger.warning("⚠️ Токен группы отсутствует для проверки", user_id=0)
+            return False
+        
+        # Используем простой запрос к VK API для проверки
+        import requests
+        response = requests.get(
+            'https://api.vk.com/method/groups.getById',
+            params={
+                'access_token': group_token,
+                'v': '5.131'
+            },
+            timeout=5
+        )
+        
+        result = response.json()
+        
+        if 'error' in result:
+            error_code = result.get('error', {}).get('error_code', 0)
+            error_msg = result.get('error', {}).get('error_msg', 'Unknown error')
+            centralized_logger.error(f"❌ Токен группы невалиден: {error_code} - {error_msg}", user_id=0)
+            return False
+        
+        if 'response' in result:
+            centralized_logger.info("✅ Токен группы валиден", user_id=0)
+            return True
+        
+        return False
+        
+    except Exception as e:
+        centralized_logger.error(f"❌ Ошибка проверки валидности токена группы: {e}", user_id=0)
         return False

@@ -110,19 +110,6 @@ class DatabaseCLI:
             else:
                 print(f"  ❌ Ошибка добавления пользователя {user_data['vk_user_id']}")
         
-        # Добавляем тестовые логи
-        test_logs = [
-            {"vk_user_id": 0, "log_level": "info", "log_message": "Система запущена"},
-            {"vk_user_id": 0, "log_level": "debug", "log_message": "Инициализация базы данных"},
-            {"vk_user_id": 1001, "log_level": "info", "log_message": "Пользователь зашел в бота"},
-        ]
-        
-        for log_data in test_logs:
-            if self.db_interface.add_bot_log(**log_data):
-                print(f"  ✅ Лог добавлен: {log_data['log_message']}")
-            else:
-                print(f"  ❌ Ошибка добавления лога")
-        
         # Добавляем тестовые сообщения
         test_messages = [
             {"vk_user_id": 1001, "message_type": "command", "message_text": "/start"},
@@ -138,27 +125,6 @@ class DatabaseCLI:
         
         print(f"\n✅ Тестовые данные добавлены: {success_count}/{len(test_users)} пользователей")
         return True
-    
-    def show_logs(self, user_id: Optional[int] = None, level: Optional[str] = None, limit: int = 20) -> None:
-        """Показать логи"""
-        print(f"📋 Логи бота (лимит: {limit}):")
-        if user_id:
-            print(f"  Пользователь: {user_id}")
-        if level:
-            print(f"  Уровень: {level}")
-        print("=" * 50)
-        
-        logs = self.db_interface.get_bot_logs(vk_user_id=user_id or 0, log_level=level, limit=limit)
-        
-        if not logs:
-            print("📭 Логов не найдено")
-            return
-        
-        for log in logs:
-            user_info = f"Пользователь {log['vk_user_id']}" if log['vk_user_id'] != 0 else "Система"
-            print(f"  [{log['log_level'].upper()}] {user_info}: {log['log_message']}")
-            print(f"    Время: {log['created_at']}")
-            print()
     
     def show_messages(self, user_id: int, limit: int = 20) -> None:
         """Показать сообщения пользователя"""
@@ -271,12 +237,6 @@ def main():
     # Команда добавления тестовых данных
     subparsers.add_parser("test-data", help="Добавить тестовые данные")
     
-    # Команда показа логов
-    logs_parser = subparsers.add_parser("logs", help="Показать логи")
-    logs_parser.add_argument("--user", type=int, help="ID пользователя")
-    logs_parser.add_argument("--level", help="Уровень логирования")
-    logs_parser.add_argument("--limit", type=int, default=20, help="Лимит записей")
-    
     # Команда показа сообщений
     messages_parser = subparsers.add_parser("messages", help="Показать сообщения пользователя")
     messages_parser.add_argument("user_id", type=int, help="ID пользователя")
@@ -316,8 +276,6 @@ def main():
             cli.show_info()
         elif args.command == "test-data":
             cli.add_test_data()
-        elif args.command == "logs":
-            cli.show_logs(user_id=args.user, level=args.level, limit=args.limit)
         elif args.command == "messages":
             cli.show_messages(user_id=args.user_id, limit=args.limit)
         elif args.command == "favorites":

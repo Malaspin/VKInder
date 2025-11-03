@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 Централизованная система логирования
-Приоритет: База данных > Файлы > Консоль
+Все логи записываются ТОЛЬКО в файлы
 """
 
 import os
 import sys
 import logging
+import inspect
 from datetime import datetime
 from typing import Optional, Dict, Any
 from loguru import logger
@@ -39,12 +40,10 @@ if __name__ == "__main__":
     sys.exit(1)
 
 class CentralizedLogger:
-    """Централизованная система логирования с приоритетом БД"""
+    """Централизованная система логирования - только файлы"""
     
     def __init__(self):
         """Инициализация централизованного логгера"""
-        self.db_available = False
-        self.db_interface = None
         self.file_logger = None
         self.console_logger = None
         self._setup_logging()
@@ -55,16 +54,10 @@ class CentralizedLogger:
             # СНАЧАЛА отключаем ВСЕ существующие логгеры
             self._disable_all_loggers()
             
-            # Инициализация БД будет выполнена лениво при первом обращении
-            self.db_interface = None
-            self.db_available = False
-            self._db_initialized = False
-            
         except Exception as e:
             logger.warning(f"⚠️ Централизованное логирование: ошибка инициализации - {e}")
-            self.db_available = False
         
-        # Настройка файлового логирования как fallback
+        # Настройка файлового логирования
         self._setup_file_logging()
         
         # Настройка консольного логирования
@@ -121,7 +114,7 @@ class CentralizedLogger:
             file_handler = logging.FileHandler(log_filename, encoding='utf-8')
             file_handler.setLevel(logging.DEBUG)
             file_formatter = logging.Formatter(
-                '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+                '%(asctime)s - %(levelname)s - %(message)s'
             )
             file_handler.setFormatter(file_formatter)
             self.file_logger.addHandler(file_handler)
@@ -168,52 +161,45 @@ class CentralizedLogger:
         except Exception as e:
             logger.error(f"❌ Ошибка настройки консольного логирования: {e}")
     
-    def _init_db_if_needed(self):
-        """Ленивая инициализация БД при первом обращении"""
-        if self._db_initialized:
-            return
-            
-        try:
-            from src.database.database_interface import DatabaseInterface
-            self.db_interface = DatabaseInterface()
-            self.db_available = True
-            self._db_initialized = True
-            logger.info("✅ Централизованное логирование: БД инициализирована")
-        except Exception as e:
-            logger.warning(f"⚠️ Централизованное логирование: БД недоступна - {e}")
-            self.db_available = False
-            self._db_interface = None
-            self._db_initialized = True  # Помечаем как инициализированную, чтобы не повторять попытки
     
-    def log_to_db_direct(self, level: str, message: str, user_id: int = 0) -> bool:
-        """Запись лога в базу данных (без использования centralized_logger)"""
-        # Инициализируем БД только если еще не инициализирована
-        if not self._db_initialized:
-            self._init_db_if_needed()
-        
-        # Если БД недоступна, не пытаемся записывать
-        if not self.db_available or not self.db_interface:
-            return False
-        
+    def _get_caller_function_name(self) -> str:
+        """Получение имени функции, вызвавшей лог"""
         try:
-            # Нормализуем уровень логирования (всегда lowercase)
-            normalized_level = level.lower()
+            # Получаем стек вызовов, пропускаем текущую функцию и методы логгера
+            stack = inspect.stack()
+            logger_methods = {'log', 'debug', 'info', 'warning', 'error', '_get_caller_function_name', 
+                             'log_to_file', 'log_to_console', 'tech_point'}
             
-            return self.db_interface.add_bot_log(
-                vk_user_id=user_id,
-                log_level=normalized_level,
-                log_message=message
-            )
-        except Exception as e:
-            # Если произошла ошибка, помечаем БД как недоступную
-            self.db_available = False
-            # Используем print вместо centralized_logger чтобы избежать рекурсии
-            print(f"❌ Ошибка записи лога в БД: {e}")
-            return False
-    
-    def log_to_db(self, level: str, message: str, user_id: int = 0) -> bool:
-        """Запись лога в базу данных (устаревший метод)"""
-        return self.log_to_db_direct(level, message, user_id)
+            for frame_info in stack[1:]:  # Пропускаем первый кадр (текущая функция)
+                frame = frame_info.frame
+                func_name = frame.f_code.co_name
+                
+                # Пропускаем методы самого логгера
+                if func_name in logger_methods:
+                    continue
+                
+                # Получаем имя модуля и функции
+                module_name = frame.f_globals.get('__name__', '')
+                if module_name:
+                    # Берем последнюю часть модуля (без полного пути)
+                    module_parts = module_name.split('.')
+                    # Если модуль находится в src, берем последние 2 части
+                    if 'src' in module_parts:
+                        src_index = module_parts.index('src')
+                        if src_index + 1 < len(module_parts):
+                            module_short = '.'.join(module_parts[src_index:])
+                        else:
+                            module_short = module_parts[-1]
+                    else:
+                        module_short = module_parts[-1]
+                    
+                    return f"{module_short}.{func_name}"
+                else:
+                    return func_name
+            
+            return "unknown"
+        except Exception:
+            return "unknown"
     
     def log_to_file(self, level: str, message: str, user_id: int = 0):
         """Запись лога в файл"""
@@ -221,8 +207,13 @@ class CentralizedLogger:
             return
         
         try:
-            # Форматируем сообщение с user_id
-            formatted_message = f"[User:{user_id}] {message}" if user_id > 0 else message
+            # Получаем имя вызывающей функции
+            caller_name = self._get_caller_function_name()
+            # Форматируем сообщение: текст в начале, метаданные в конце
+            if user_id > 0:
+                formatted_message = f"{message} [Id:{user_id}; def:{caller_name}]"
+            else:
+                formatted_message = f"{message} [def:{caller_name}]"
             
             # Записываем в файл
             if level.lower() == 'debug':
@@ -252,8 +243,13 @@ class CentralizedLogger:
             return
         
         try:
-            # Форматируем сообщение с user_id
-            formatted_message = f"[User:{user_id}] {message}" if user_id > 0 else message
+            # Получаем имя вызывающей функции
+            caller_name = self._get_caller_function_name()
+            # Форматируем сообщение: текст в начале, метаданные в конце
+            if user_id > 0:
+                formatted_message = f"{message} [Id:{user_id}; def:{caller_name}]"
+            else:
+                formatted_message = f"{message} [def:{caller_name}]"
             
             # Записываем в консоль БЕЗ использования стандартного логгера
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {normalized_level.upper()} - {formatted_message}")
@@ -263,7 +259,7 @@ class CentralizedLogger:
     
     def log(self, level: str, message: str, user_id: int = 0, force_console: bool = False):
         """
-        Централизованная запись лога (файл, БД, консоль только для WARNING/ERROR)
+        Централизованная запись лога (только файл, консоль для WARNING/ERROR)
         
         Args:
             level: Уровень логирования (debug, info, warning, error)
@@ -271,14 +267,10 @@ class CentralizedLogger:
             user_id: ID пользователя (0 для системных логов)
             force_console: Принудительный вывод в консоль
         """
-        # Приоритет 1: База данных (если доступна)
-        if self.db_available:
-            self.log_to_db_direct(level, message, user_id)
-        
-        # Приоритет 2: Файл (всегда записываем как fallback)
+        # Записываем в файл (единственное место логирования)
         self.log_to_file(level, message, user_id)
         
-        # Приоритет 3: Консоль (только WARNING и ERROR, или принудительно)
+        # Консоль (только WARNING и ERROR, или принудительно)
         if force_console or level.lower() in ['warning', 'error']:
             self.log_to_console(level, message, user_id)
     
@@ -295,12 +287,16 @@ class CentralizedLogger:
         self.log('warning', message, user_id)
     
     def tech_point(self, message: str, user_id: int = 0):
-        """Техническая реперная точка - выводится в консоль и БД"""
+        """Техническая реперная точка - выводится в консоль и файл"""
         # В консоль выводим напрямую
-        formatted_message = f"[User:{user_id}] {message}" if user_id > 0 else message
+        caller_name = self._get_caller_function_name()
+        if user_id > 0:
+            formatted_message = f"{message} [Id:{user_id}; def:{caller_name}]"
+        else:
+            formatted_message = f"{message} [def:{caller_name}]"
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - INFO - 📍 {formatted_message}")
         
-        # В БД записываем как INFO
+        # В файл записываем как INFO
         self.log('info', message, user_id)
     
     def error(self, message: str, user_id: int = 0):
@@ -308,19 +304,13 @@ class CentralizedLogger:
         self.log('error', message, user_id)
     
     def get_logs(self, user_id: int = 0, level: str = None, limit: int = 100) -> list:
-        """Получение логов из базы данных"""
-        if not self.db_available or not self.db_interface:
-            return []
-        
-        try:
-            return self.db_interface.get_bot_logs(user_id, level, limit)
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения логов из БД: {e}")
-            return []
+        """Получение логов (заглушка - логи только в файлах)"""
+        # Логи теперь только в файлах, из БД не читаем
+        return []
     
     def is_db_available(self) -> bool:
-        """Проверка доступности базы данных"""
-        return self.db_available
+        """Проверка доступности базы данных (всегда False - логирование в БД отключено)"""
+        return False
 
 # Глобальный экземпляр централизованного логгера
 centralized_logger = CentralizedLogger()
@@ -343,9 +333,9 @@ def log_error(message: str, user_id: int = 0):
     centralized_logger.error(message, user_id)
 
 def get_logs(user_id: int = 0, level: str = None, limit: int = 100) -> list:
-    """Получение логов из базы данных"""
+    """Получение логов (заглушка - логи только в файлах)"""
     return centralized_logger.get_logs(user_id, level, limit)
 
 def is_db_logging_available() -> bool:
-    """Проверка доступности логирования в БД"""
+    """Проверка доступности логирования в БД (всегда False - логирование в БД отключено)"""
     return centralized_logger.is_db_available()
